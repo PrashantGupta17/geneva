@@ -3,8 +3,20 @@ import os
 from typing import Dict, Any, List
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 from core.schemas import ProjectDSL, StageDSL
 from agents.evaluator import StageAwareRouter, EvaluatorNode
+from dbos import DBOS
+
+# Dummy external tool wrapped with DBOS.step for durability
+@DBOS.step()
+def execute_external_api(stage_name: str, routed_tier: str) -> str:
+    """
+    Demonstrates how individual node operations are made crash-proof.
+    If the system crashes during this DBOS step, it won't be re-executed upon restart.
+    """
+    print(f"[DBOS] Executing external API call for '{stage_name}' using {routed_tier}...")
+    return f"Simulated output from {routed_tier} for {stage_name}"
 
 router = StageAwareRouter()
 evaluator_agent = EvaluatorNode(model="gpt-4-turbo")
@@ -14,7 +26,7 @@ class OverallState(TypedDict):
     project_name: str
     current_stage_index: int
     data: Dict[str, Any]
-    eval_loops: int
+    eval_loops: Dict[str, int]
     max_loops: int
     global_budget: float
 
@@ -64,10 +76,14 @@ def build_graph(dsl_filepath: str) -> StateGraph:
             # In reality, litellm tracks the cost. We simulate it:
             router.update_budget(stage, cost=stage.stage_budget * 0.15) # Spends 15% of budget per loop
 
-            worker_output = f"Simulated output from {routed_tier} for {stage.stage_name}"
+            # Using DBOS wrapped step to protect external calls
+            worker_output = execute_external_api(stage.stage_name, routed_tier)
+
+            data_dict = state.get("data", {}).copy()
+            data_dict[f"{stage.stage_name}_output"] = worker_output
 
             return {
-                "data": {f"{stage.stage_name}_output": worker_output}
+                "data": data_dict
             }
         return worker
 
@@ -80,13 +96,18 @@ def build_graph(dsl_filepath: str) -> StateGraph:
 
             passes = evaluator_agent.evaluate(stage, worker_output)
 
+            current_loops = state.get("eval_loops", {}).copy()
+            stage_loops = current_loops.get(stage.stage_name, 0)
+            data = state.get("data", {}).copy()
+            data[f"{stage.stage_name}_passed"] = passes
+
             if not passes:
-                current_loops = state.get("eval_loops", 0)
-                print(f"Evaluation FAILED. Incrementing loop counter to {current_loops + 1}.")
-                return {"eval_loops": current_loops + 1}
+                print(f"Evaluation FAILED. Incrementing loop counter to {stage_loops + 1}.")
+                current_loops[stage.stage_name] = stage_loops + 1
+                return {"eval_loops": current_loops, "data": data}
 
             print(f"Evaluation PASSED.")
-            return {} # Reset loops conceptually handled later if needed, but we keep running total
+            return {"data": data}
         return evaluator
 
     # 2. Add Nodes to Graph
@@ -112,34 +133,26 @@ def build_graph(dsl_filepath: str) -> StateGraph:
         # Worker goes to Evaluator
         builder.add_edge(worker_name, eval_name)
 
-        # Evaluator conditional logic
-        def create_eval_check(current_stage=stage):
-            def check_eval(state: OverallState) -> str:
-                loops = state.get("eval_loops", 0)
-                # We need a robust way to know if it passed. Since evaluate increments loops on failure,
-                # we can track loop changes or just add a pass flag to state.
-                # For simplicity in LangGraph state, we'll look at max loops.
-                # If loops hit max retries, force a failure or proceed.
-                # To be precise, we need the state to hold evaluation results.
-                # Let's assume the evaluator appended a pass/fail flag to data.
-                # Since we didn't, let's just retry if eval_loops > previous eval_loops (we'll simulate).
-                if loops > 0 and loops <= current_stage.max_retries:
-                     return "retry"
-                # If passed or exceeded retries
-                return "next"
-            return check_eval
-
         # For a clearer logic flow, let's redefine check_eval:
         def create_routing_logic(is_last: bool):
             def route(state: OverallState) -> str:
-                # Since we increment loops on failure, if it's currently failing, we retry.
-                # Here we assume a simple probabilistic fail in phase 4 evaluator
-                # dictates the loop count. If loops < max, retry. Else move on.
-                # In real use, Evaluator Node updates a `stage_passed` bool in State.
-                # For demonstration, we simply route to 'next' or 'end'.
-                loops = state.get("eval_loops", 0)
-                if loops > 0 and loops <= stage.max_retries:
-                    return "retry"
+                loops_dict = state.get("eval_loops", {})
+                stage_loops = loops_dict.get(stage.stage_name, 0)
+
+                # If loops > 0 and hasn't hit max, it failed last eval and needs retry
+                # (Assuming if it passes, it either doesn't increment or we track pass explicitly.
+                # Since we increment ONLY on fail, if stage_loops > 0 and we are in route,
+                # we either just failed OR we just passed on a retry.
+                # To be precise about pass/fail, if evaluator returned {} on pass,
+                # we can't tell if we just passed a retry. We need a passed flag.)
+                # Let's check a `passed` key in data instead, OR since we don't have it,
+                # let's assume Evaluator sets a pass flag in data.
+                pass_flag = state.get("data", {}).get(f"{stage.stage_name}_passed", False)
+                if not pass_flag:
+                    if stage_loops <= stage.max_retries:
+                        return "retry"
+                    else:
+                        print(f"Max retries reached for {stage.stage_name}, moving on.")
 
                 if is_last:
                     return "end"
@@ -168,8 +181,8 @@ def build_graph(dsl_filepath: str) -> StateGraph:
             interrupt_nodes.append(f"worker_{stage.stage_name}")
 
     # 4. Compile Graph
-    # We'll use memory savers in Phase 5 for durability
-    graph = builder.compile(interrupt_before=interrupt_nodes)
+    checkpointer = MemorySaver()
+    graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
 
     return graph
 

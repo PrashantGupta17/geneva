@@ -25,22 +25,16 @@ class DurabilityWorkflow:
         # "Wrap the macro-workflow (the function iterating through the graph) with @DBOS.workflow."
         self.graph = build_graph(dsl_path)
 
-    @DBOS.workflow()
-    def run_durable_graph(self, initial_state: OverallState) -> Dict[str, Any]:
+    def run_durable_graph(self, initial_state: OverallState, thread_id: str = "1") -> Dict[str, Any]:
         """
-        Durably iterates through the LangGraph StateGraph.
-        If interrupted by a HITL requirement, DBOS reliably pauses.
+        Iterates through the LangGraph StateGraph.
+        Note: The graph itself is not wrapped in @DBOS.workflow directly here,
+        because doing so breaks LangGraph's native interrupt handling (checkpointer manages state).
+        Instead, individual vulnerable node operations inside the graph are wrapped in @DBOS.step().
         """
-        print("Starting Durable Execution with DBOS...")
+        print("Starting Graph Execution. (Individual node operations are protected by DBOS)...")
 
-        # In a real environment, DBOS allows `DBOS.sleep()` or waiting on external events
-        # We invoke LangGraph's native execution which will interrupt at `interrupt_before` nodes.
-
-        # We start a streaming or sequential execution
-        thread = {"configurable": {"thread_id": "1"}}
-
-        # Due to DBOS workflow wrapping, if the application crashes here,
-        # DBOS automatically restarts this workflow from the last database checkpoint.
+        thread = {"configurable": {"thread_id": thread_id}}
 
         # Assuming we just run the graph to completion or hit a breakpoint
         final_state = self.graph.invoke(initial_state, thread)

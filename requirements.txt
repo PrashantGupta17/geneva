@@ -1,6 +1,6 @@
 langgraph
 langgraph-cli[inmem]
-dbos-transact
+dbos
 litellm
 langfuse
 chromadb

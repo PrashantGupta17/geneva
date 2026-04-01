@@ -85,30 +85,25 @@ If the output strictly adheres to the criteria and satisfies the requirements, r
 If it fails in any way, reply with EXACTLY "FAIL".
 """
         try:
-            # We use litellm for the call
-            # Using a fallback for demonstration if API fails
             logger.info(f"Evaluating output for stage '{stage.stage_name}'...")
 
-            # Simulated litellm call
-            # response = completion(
-            #     model=self.model,
-            #     messages=[
-            #         {"role": "system", "content": system_prompt},
-            #         {"role": "user", "content": f"Worker Output:\n{worker_output}"}
-            #     ],
-            #     temperature=0.0
-            # )
-            # result = response.choices[0].message.content.strip()
-            # return result == "PASS"
+            # Note: We rely on the user having litellm set up.
+            # If standard litellm is not configured or fails, it throws an exception, and we return False.
+            response = completion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Worker Output:\n{worker_output}"}
+                ],
+                temperature=0.0
+            )
 
-            # MOCK EVALUATION:
-            # In a real environment with API keys, the above block runs.
-            # Here we just mock a pass 80% of the time.
-            import random
-            passed = random.random() > 0.2
+            result = response.choices[0].message.content.strip().upper()
+
+            passed = (result == "PASS")
             logger.info(f"Evaluation result for '{stage.stage_name}': {'PASS' if passed else 'FAIL'}")
             return passed
 
         except Exception as e:
-            logger.error(f"Evaluation error: {e}. Defaulting to FAIL.")
+            logger.error(f"Evaluation error calling LiteLLM: {e}. Defaulting to FAIL.")
             return False

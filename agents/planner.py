@@ -3,6 +3,7 @@ import json
 import os
 from typing import Dict, Any
 from core.schemas import ProjectDSL
+from memory.reflection import ReflectionMemory
 
 # Optional litellm import to generate DSL via API
 from litellm import completion
@@ -10,11 +11,14 @@ from litellm import completion
 class PlannerAgent:
     def __init__(self, model: str = "gpt-4-turbo"):
         self.model = model
+        self.memory = ReflectionMemory()
 
-    def generate_dsl(self, problem_description: str, past_examples: str = "") -> ProjectDSL:
+    def generate_dsl(self, problem_description: str) -> ProjectDSL:
         """
         Takes a natural language problem description and generates a YAML/JSON DSL defining the project.
+        Automatically retrieves past examples from ChromaDB to inform layout.
         """
+        past_examples = self.memory.retrieve_similar_projects(problem_description)
 
         system_prompt = f"""
 You are an expert Lead Systems Architect Planner.
