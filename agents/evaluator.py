@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import Dict, Any, Tuple
-from litellm import completion, get_llm_provider
+from litellm import completion, get_llm_provider, completion_cost
 from core.schemas import StageDSL
 
 # Setup simple logger
@@ -67,7 +67,7 @@ class EvaluatorNode:
     def __init__(self, model: str = "gpt-4-turbo"):
         self.model = model # Evaluator typically uses a premium model for reliable judgment
 
-    def evaluate(self, stage: StageDSL, worker_output: Any) -> bool:
+    def evaluate(self, stage: StageDSL, worker_output: Any) -> Tuple[bool, float]:
         """
         Evaluates the worker's output against the success criteria.
         Returns True if it passes, False otherwise.
@@ -101,9 +101,13 @@ If it fails in any way, reply with EXACTLY "FAIL".
             result = response.choices[0].message.content.strip().upper()
 
             passed = (result == "PASS")
-            logger.info(f"Evaluation result for '{stage.stage_name}': {'PASS' if passed else 'FAIL'}")
-            return passed
+            try:
+                cost = completion_cost(completion_response=response)
+            except Exception:
+                cost = 0.0
+            logger.info(f"Evaluation result for '{stage.stage_name}': {'PASS' if passed else 'FAIL'}, Cost: {cost}")
+            return passed, cost
 
         except Exception as e:
             logger.error(f"Evaluation error calling LiteLLM: {e}. Defaulting to FAIL.")
-            return False
+            return False, 0.0
