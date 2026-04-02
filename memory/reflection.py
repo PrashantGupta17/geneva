@@ -45,8 +45,13 @@ class ReflectionMemory:
         )
 
         examples = []
-        for i, doc in enumerate(results['documents'][0]):
-            meta = results['metadatas'][0][i]
+        docs = results.get('documents')
+        metas = results.get('metadatas')
+        if not docs or not docs[0] or not metas or not metas[0]:
+            return "No past examples found."
+
+        for i, doc in enumerate(docs[0]):
+            meta = metas[0][i]
             examples.append(
                 f"--- Past Problem ---\n{doc}\n"
                 f"--- Successful DSL ---\n{meta['yaml_dsl']}\n"

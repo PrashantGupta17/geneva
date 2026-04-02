@@ -30,6 +30,7 @@ def main():
 
         print(f"\n[CLI] Project DSL generated and saved to {dsl_filename}.")
         print("[CLI] Please open LangGraph Studio now to visualize the workflow graph.")
+        input("[CLI] Press Enter when you are ready to proceed with execution approval...")
 
         # Interactive loop for execution approval
         while True:

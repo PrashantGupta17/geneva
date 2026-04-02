@@ -2,7 +2,7 @@ import yaml
 import json
 import os
 from typing import Dict, Any
-from core.schemas import ProjectDSL
+from core.schemas import ProjectDSL, StageDSL
 from memory.reflection import ReflectionMemory
 
 # Optional litellm import to generate DSL via API
@@ -14,10 +14,6 @@ class PlannerAgent:
         self.memory = ReflectionMemory()
 
     def generate_dsl(self, problem_description: str) -> ProjectDSL:
-        """
-        Takes a natural language problem description and generates a YAML/JSON DSL defining the project.
-        Automatically retrieves past examples from ChromaDB to inform layout.
-        """
         past_examples = self.memory.retrieve_similar_projects(problem_description)
 
         system_prompt = f"""
@@ -40,26 +36,18 @@ Past successful examples (use these to optimize your layout if provided):
 
 Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schema. No markdown wrapping.
 """
-
-        # If API keys aren't set, we can simulate or fallback.
-        # But we'll try to use litellm if possible.
         try:
-            # We'll try to use a cheaper/free model to generate the DSL if standard litellm is not configured
-            # But the instructions say "use litellm completion"
             response = completion(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Problem: {problem_description}"}
                 ],
-                # litellm config parameters here if needed
-                response_format={ "type": "json_object" } # Assuming the model supports it
+                response_format={ "type": "json_object" }
             )
 
             content = response.choices[0].message.content
-            # Parse JSON
             dsl_dict = json.loads(content)
-            # Validate with Pydantic
             dsl = ProjectDSL(**dsl_dict)
             return dsl
 
@@ -69,31 +57,30 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
             return self._fallback_dsl(problem_description)
 
     def _fallback_dsl(self, problem_description: str) -> ProjectDSL:
-        """Fallback deterministic DSL when LLM call fails."""
         return ProjectDSL(
             project_name="fallback-project",
             global_budget=1.0,
             max_loops=10,
             stages=[
-                {
-                    "stage_name": "research",
-                    "assigned_model_tier": "standard",
-                    "stage_budget": 0.2,
-                    "success_criteria": {
+                StageDSL(
+                    stage_name="research",
+                    assigned_model_tier="standard",
+                    stage_budget=0.2,
+                    success_criteria={
                         "type": "object",
                         "properties": {
                             "findings": {"type": "array", "items": {"type": "string"}}
                         },
                         "required": ["findings"]
                     },
-                    "requires_human_approval": False,
-                    "max_retries": 3
-                },
-                {
-                    "stage_name": "drafting",
-                    "assigned_model_tier": "premium",
-                    "stage_budget": 0.8,
-                    "success_criteria": {
+                    requires_human_approval=False,
+                    max_retries=3
+                ),
+                StageDSL(
+                    stage_name="drafting",
+                    assigned_model_tier="premium",
+                    stage_budget=0.8,
+                    success_criteria={
                         "type": "object",
                         "properties": {
                             "content": {"type": "string"},
@@ -101,20 +88,19 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
                         },
                         "required": ["content", "word_count"]
                     },
-                    "requires_human_approval": True,
-                    "max_retries": 2
-                }
+                    requires_human_approval=True,
+                    max_retries=2
+                )
             ]
         )
 
     def write_dsl_to_yaml(self, dsl: ProjectDSL, filename: str = "project_dsl.yaml"):
-        """Write the Pydantic DSL to a YAML file."""
         with open(filename, "w") as f:
             yaml.dump(dsl.model_dump(), f, sort_keys=False)
         print(f"DSL successfully written to {filename}")
 
 if __name__ == "__main__":
-    planner = PlannerAgent(model="openrouter/auto") # Use openrouter auto or any other model
+    planner = PlannerAgent(model="openrouter/auto")
     problem = "Research the latest advancements in solid state batteries and write a short summary report."
     dsl = planner.generate_dsl(problem)
     planner.write_dsl_to_yaml(dsl)
