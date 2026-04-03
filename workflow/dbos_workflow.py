@@ -37,7 +37,7 @@ class DurabilityWorkflow:
         thread = {"configurable": {"thread_id": thread_id}}
 
         # Assuming we just run the graph to completion or hit a breakpoint
-        final_state = self.graph.invoke(initial_state, thread)
+        final_state = self.graph.invoke(initial_state, config=thread) # type: ignore
 
         print("Graph execution complete or paused at HITL breakpoint.")
         return final_state
@@ -53,7 +53,7 @@ if __name__ == "__main__":
             "project_name": "Test Project",
             "current_stage_index": 0,
             "data": {},
-            "eval_loops": 0,
+            "eval_loops": {},
             "max_loops": 10,
             "global_budget": 10.0
         }
