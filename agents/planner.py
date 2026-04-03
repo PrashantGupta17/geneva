@@ -56,6 +56,40 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
             print("Falling back to a deterministic dummy DSL for testing purposes.")
             return self._fallback_dsl(problem_description)
 
+    def refine_dsl(self, current_dsl: ProjectDSL, user_feedback: str) -> ProjectDSL:
+        system_prompt = f"""
+You are an expert Lead Systems Architect Planner.
+The user has provided feedback to refine an existing Project DSL.
+Your job is to read the existing DSL and the user's natural language feedback, and output a new, updated strict JSON representation of the Project DSL.
+
+Current DSL:
+{current_dsl.model_dump_json(indent=2)}
+
+User Feedback:
+{user_feedback}
+
+Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schema. No markdown wrapping.
+"""
+        try:
+            response = completion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Please update the DSL based on my feedback."}
+                ],
+                response_format={ "type": "json_object" }
+            )
+
+            content = response.choices[0].message.content
+            dsl_dict = json.loads(content)
+            dsl = ProjectDSL(**dsl_dict)
+            return dsl
+
+        except Exception as e:
+            print(f"Error calling LLM for DSL refinement: {e}")
+            print("Returning the original DSL as fallback.")
+            return current_dsl
+
     def _fallback_dsl(self, problem_description: str) -> ProjectDSL:
         return ProjectDSL(
             project_name="fallback-project",

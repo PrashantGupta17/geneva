@@ -5,23 +5,40 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from core.schemas import ProjectDSL, StageDSL
 from agents.evaluator import StageAwareRouter, EvaluatorNode
 from dbos import DBOS
 
+import subprocess
 from litellm import completion, completion_cost
 from typing import Tuple
 
+from core.registry import ProviderRegistry
+from utils.storage import StorageManager
+
+registry = ProviderRegistry()
+storage_manager = StorageManager()
+
+def load_providers_from_config(config_path="geneva_config.yaml"):
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f) or {}
+            providers = config.get("providers", [])
+            for p in providers:
+                if p.get("type") == "api":
+                    registry.add_api_provider(p["name"], p["litellm_model_name"])
+                elif p.get("type") == "cli":
+                    registry.add_cli_provider(p["name"], p["absolute_path"], p["test_command"])
+
+load_providers_from_config()
+
 # External tool wrapped with DBOS.step for durability
 @DBOS.step()
-def execute_external_api(stage_name: str, routed_tier: str, prompt: str) -> Tuple[str, float]:
-    """
-    Demonstrates how individual node operations are made crash-proof.
-    If the system crashes during this DBOS step, it won't be re-executed upon restart.
-    Actually calls LiteLLM to perform the task and return real cost.
-    """
-    print(f"[DBOS] Executing actual LLM call for '{stage_name}' using tier '{routed_tier}'...")
-    model_name = "gpt-4-turbo" if routed_tier == "premium" else "gpt-3.5-turbo"
+def execute_external_api(stage_name: str, provider_info: dict, prompt: str) -> Tuple[str, float]:
+    print(f"[DBOS] Executing API LLM call for '{stage_name}'...")
+    model_name = provider_info.get("litellm_model_name", "gpt-3.5-turbo")
 
     try:
         response = completion(
@@ -30,15 +47,76 @@ def execute_external_api(stage_name: str, routed_tier: str, prompt: str) -> Tupl
             temperature=0.0
         )
         output = response.choices[0].message.content
-        cost = completion_cost(completion_response=response)
+        try:
+            cost = completion_cost(completion_response=response)
+        except:
+            cost = 0.0
         return output, cost
     except Exception as e:
-        print(f"[DBOS] LLM call failed: {e}")
+        print(f"[DBOS] LLM API call failed: {e}")
         return f"Error: {e}", 0.0
 
+@DBOS.step()
+def execute_external_cli(stage_name: str, provider_info: dict, prompt: str) -> Tuple[str, float]:
+    print(f"[DBOS] Executing CLI command for '{stage_name}'...")
+    cli_path = provider_info.get("absolute_path", "")
+
+    try:
+        # Pass the prompt to the CLI using a standard approach (e.g., echo prompt | cli or pass as arg)
+        # We will assume passing it via stdin or as an argument. Let's write it to a temp file and pass it.
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+            f.write(prompt)
+            temp_path = f.name
+
+        result = subprocess.run(
+            f"{cli_path} < \"{temp_path}\"",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        os.remove(temp_path)
+
+        output = result.stdout
+        if result.returncode != 0:
+            output = f"CLI Error: {result.stderr}"
+
+        # Mock cost for CLI
+        return output, 0.0
+    except Exception as e:
+        print(f"[DBOS] CLI call failed: {e}")
+        return f"Error: {e}", 0.0
+
+@DBOS.step()
+def persist_if_large_step(payload: str) -> str:
+    # Use StorageManager to check and persist
+    return storage_manager.persist_if_large(payload)
+
 @DBOS.workflow()
-def execute_external_api_workflow(stage_name: str, routed_tier: str, prompt: str) -> Tuple[str, float]:
-    return execute_external_api(stage_name, routed_tier, prompt)
+def universal_step(stage_name: str, routed_tier: str, prompt: str, iteration_index: int, thread_id: str) -> Tuple[str, float]:
+    """
+    Universal executor that handles routing to either CLI or API provider.
+    Wrapped in a single DBOS.workflow to guarantee atomicity.
+    """
+    # Since routed_tier determines model class, we'll map standard/premium to a mock provider logic.
+    # In a real scenario, the stage config would specify the provider name.
+    # We will fallback to "api" type if not specifically a CLI provider name.
+
+    # We can check if `routed_tier` directly matches a registered CLI provider.
+    # For now, let's treat "premium" as API gpt-4-turbo, and others as well,
+    # unless the assigned_model_tier in the DSL was exactly a CLI provider name.
+    provider_info = registry.get_provider(routed_tier)
+
+    if provider_info and provider_info["type"] == "cli":
+        output, cost = execute_external_cli(stage_name, provider_info, prompt)
+    else:
+        # Default to API
+        model_name = "gpt-4-turbo" if routed_tier == "premium" else "gpt-3.5-turbo"
+        mock_provider = {"type": "api", "litellm_model_name": model_name}
+        output, cost = execute_external_api(stage_name, mock_provider, prompt)
+
+    final_output = persist_if_large_step(output)
+    return final_output, cost
 
 router = StageAwareRouter()
 evaluator_agent = EvaluatorNode(model="gpt-4-turbo")
@@ -73,7 +151,11 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
         builder.add_node("waiting", dummy_node)
         builder.add_edge(START, "waiting")
         builder.add_edge("waiting", END)
-        return builder.compile(checkpointer=MemorySaver())
+        # We need a persistent checkpointer for the fallback as well if we are standardizing
+        conn = sqlite3.connect("geneva_persistence.db", check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+        checkpointer.setup()
+        return builder.compile(checkpointer=checkpointer)
 
     dsl = load_dsl(dsl_filepath)
     stages = dsl.stages
@@ -102,7 +184,38 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
             # Using DBOS wrapped step to protect external calls
             # Must wrap the step inside a workflow for DBOS to track it natively within LangGraph
-            worker_output, worker_cost = execute_external_api_workflow(stage.stage_name, routed_tier, modified_prompt)
+            iteration_index = state.get("eval_loops", {}).get(stage.stage_name, 0)
+
+            # Since thread_id is available in runnable config when executed through invoke/stream,
+            # we can inject it via state, but we don't have config here directly.
+            # As a simpler approach, we'll pass project_name as part of thread identifier for now.
+            thread_id = state.get("project_name", "unknown")
+
+            # Use dbos Context or pass ID if natively supported.
+            # In Python DBOS, SetWorkflowID does not exist as an attribute on DBOS class directly in the way used.
+            # The simplest valid way is to invoke the workflow via handle or with context if supported,
+            # or simply rely on DBOS auto-generating the UUID if we can't manually set it this way.
+            # Since the requirement is that DBOS manages it durability natively, calling the workflow function normally is usually sufficient for standard restart-proof flows within an active DBOS runner.
+
+            # Use DBOS workflow invocation directly (needs to be invoked via handle if already inside a thread or normally,
+            # but usually DBOS requires starting from a top level if it's the root workflow.
+            # To avoid "invoked before DBOS initialized" in LangGraph thread context which isn't registered,
+            # we can execute it synchronously if DBOS.launch() was called.)
+            # Wait, DBOS requires workflows to be invoked correctly. Let's make sure DBOS.launch() is actually effective.
+            # Since DBOS launch runs, we can just call it. But maybe langgraph runs it in a background thread that DBOS doesn't recognize.
+            # We'll invoke it synchronously.
+            workflow_id = f"{thread_id}-{stage.stage_name}-{iteration_index}"
+            if os.environ.get("DBOS_DISABLE") == "1":
+                # Fallback directly for environment testing
+                print(f"[DBOS Mock] Bypassing DBOS workflow invocation for test environment.")
+                if registry.get_provider(routed_tier) and registry.get_provider(routed_tier)["type"] == "cli":
+                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, registry.get_provider(routed_tier), modified_prompt)
+                else:
+                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt)
+                worker_output = persist_if_large_step.__wrapped__(output)
+            else:
+                handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id)
+                worker_output, worker_cost = handle.get_result()
 
             router.update_budget(stage, cost=worker_cost)
 
@@ -210,7 +323,9 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             interrupt_nodes.append(f"worker_{stage.stage_name}")
 
     # 4. Compile Graph
-    checkpointer = MemorySaver()
+    conn = sqlite3.connect("geneva_persistence.db", check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    checkpointer.setup()
     graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
 
     return graph

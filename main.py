@@ -28,15 +28,17 @@ def main():
         dsl_filename = "project_dsl.yaml"
         planner.write_dsl_to_yaml(dsl, filename=dsl_filename)
 
-        print(f"\n[CLI] Project DSL generated and saved to {dsl_filename}.")
-        print("[CLI] Please open LangGraph Studio now to visualize the workflow graph.")
-        input("[CLI] Press Enter when you are ready to proceed with execution approval...")
+        print(f"\n[CLI] Initial Project DSL generated and saved to {dsl_filename}.")
 
-        # Interactive loop for execution approval
+        import uuid
+        thread_id = str(uuid.uuid4())
+        print(f"[CLI] Generated Thread ID for this project: {thread_id}")
+
+        # Interactive loop for execution approval and refinement
         while True:
-            decision = input("Type 'approve' to execute the graph, or 'reject' to start over: ").strip().lower()
+            decision = input("Type 'approve' to execute, 'reject' to start over, or provide feedback to refine the plan: ").strip()
 
-            if decision == 'approve':
+            if decision.lower() == 'approve':
                 print(f"\n[CLI] Compiling and executing graph for '{dsl.project_name}'...")
 
                 # Dynamically compile the graph
@@ -51,9 +53,14 @@ def main():
                     "global_budget": dsl.global_budget
                 }
 
-                thread_config = {"configurable": {"thread_id": "cli-thread-1"}}
+                thread_config = {"configurable": {"thread_id": thread_id}}
 
                 try:
+                    # Sync Thread ID with DBOS workflow execution using Context/DBOS directly isn't natively exposed in
+                    # graph.invoke() without custom runner. But DBOS workflow ID can be set if we wrapped the whole
+                    # execution. However, we are running steps inside graph.
+                    # As a workaround or basic sync, we use the same thread_id as the langgraph thread.
+                    # And DBOS automatically manages its internal IDs. If we really need DBOS to use it, we could pass it.
                     final_state = graph.invoke(initial_state, thread_config)
                     print("\n[CLI] Graph execution completed successfully!")
 
@@ -65,11 +72,17 @@ def main():
 
                 break
 
-            elif decision == 'reject':
+            elif decision.lower() == 'reject':
                 print("[CLI] Discarding current DSL and starting over.")
                 break
             else:
-                print("Invalid input. Please type 'approve' or 'reject'.")
+                print(f"\n[CLI] Refining DSL based on feedback: '{decision}'...")
+                dsl = planner.refine_dsl(dsl, decision)
+                planner.write_dsl_to_yaml(dsl, filename=dsl_filename)
+                print(f"[CLI] DSL refined and updated in {dsl_filename}.")
+                print("\n[CLI] Updated DSL structure:")
+                for i, stage in enumerate(dsl.stages):
+                    print(f"  Stage {i+1}: {stage.stage_name} (Model: {stage.assigned_model_tier})")
 
 if __name__ == "__main__":
     main()
