@@ -53,7 +53,7 @@ if __name__ == "__main__":
             "project_name": "Test Project",
             "current_stage_index": 0,
             "data": {},
-            "eval_loops": 0,
+            "eval_loops": {},
             "max_loops": 10,
             "global_budget": 10.0
         }

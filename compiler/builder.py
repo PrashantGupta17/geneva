@@ -135,7 +135,10 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 return {"eval_loops": current_loops, "data": data}
 
             print(f"Evaluation PASSED.")
-            return {"data": data}
+            return {
+                "current_stage_index": state.get("current_stage_index", 0) + 1,
+                "data": data
+            }
         return evaluator
 
     # 2. Add Nodes to Graph
@@ -165,22 +168,20 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
         def create_routing_logic(current_stage, is_last: bool):
             def route(state: OverallState) -> str:
                 loops_dict = state.get("eval_loops", {})
+
+                total_loops = sum(loops_dict.values())
+                if total_loops > state.get("max_loops", 10):
+                    print(f"Global loop safety triggered: total_loops ({total_loops}) > max_loops ({state.get('max_loops', 10)}).")
+                    return "end"
+
                 stage_loops = loops_dict.get(current_stage.stage_name, 0)
 
-                # If loops > 0 and hasn't hit max, it failed last eval and needs retry
-                # (Assuming if it passes, it either doesn't increment or we track pass explicitly.
-                # Since we increment ONLY on fail, if stage_loops > 0 and we are in route,
-                # we either just failed OR we just passed on a retry.
-                # To be precise about pass/fail, if evaluator returned {} on pass,
-                # we can't tell if we just passed a retry. We need a passed flag.)
-                # Let's check a `passed` key in data instead, OR since we don't have it,
-                # let's assume Evaluator sets a pass flag in data.
                 pass_flag = state.get("data", {}).get(f"{current_stage.stage_name}_passed", False)
                 if not pass_flag:
                     if stage_loops <= current_stage.max_retries:
                         return "retry"
                     else:
-                        print(f"Max retries reached for {current_stage.stage_name}, moving on.")
+                        print(f"WARNING: Max retries ({current_stage.max_retries}) reached for {current_stage.stage_name}. Moving to next node.")
 
                 if is_last:
                     return "end"
