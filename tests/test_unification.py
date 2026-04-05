@@ -61,11 +61,16 @@ def test_evaluator_fanout_routing(mock_eval):
     with open("test_dsl.yaml", "w") as f:
         yaml.dump(ProjectDSL(project_name="test", global_budget=1.0, stages=[stage]).model_dump(), f)
 
-    graph = build_graph("test_dsl.yaml")
-    os.remove("test_dsl.yaml")
+    try:
+        os.environ["DBOS_DISABLE"] = "1"
+        graph = build_graph("test_dsl.yaml")
+    finally:
+        os.remove("test_dsl.yaml")
+        if "DBOS_DISABLE" in os.environ:
+            del os.environ["DBOS_DISABLE"]
 
     # The evaluator node is named "evaluator_test_fanout"
-    evaluator_runnable = graph.nodes["evaluator_test_fanout"]
+    evaluator_runnable = graph.builder.nodes["evaluator_test_fanout"].runnable
 
     mock_eval.return_value = (True, 0.05)
 
@@ -124,29 +129,32 @@ def test_cli_help_parsing(mock_exists, mock_completion, mock_run):
     # Force it to think no config exists
     mock_exists.return_value = False
 
-    # Mock discovering an ollama cli
-    import shutil
-    with patch("shutil.which", return_value="/usr/bin/ollama") as mock_which, \
-         patch("builtins.input", side_effect=["1"]): # Select option 1 (ollama)
+    # Ensure environment variables are not set for discovery so that local CLI is the only thing
+    import os
+    with patch.dict(os.environ, clear=True):
+        # Mock discovering an ollama cli
+        import shutil
+        with patch("shutil.which", return_value="/usr/bin/ollama") as mock_which, \
+             patch("builtins.input", side_effect=["1"]): # Select option 1 (ollama)
 
-        # We need to mock subprocess.run correctly:
-        # First call is test_command (ollama --version)
-        # Second call is ollama --help
-        mock_run.side_effect = [
-            MagicMock(stdout="ollama version 1.0", stderr="", returncode=0), # test_command
-            MagicMock(stdout="Usage: ollama run <model> --depth <int>", stderr="", returncode=0) # --help
-        ]
+            # We need to mock subprocess.run correctly:
+            # First call is test_command (ollama --version)
+            # Second call is ollama --help
+            mock_run.side_effect = [
+                MagicMock(stdout="ollama version 1.0", stderr="", returncode=0), # test_command
+                MagicMock(stdout="Usage: ollama run <model> --depth <int>", stderr="", returncode=0) # --help
+            ]
 
-        # Mock litellm completion to return {"--depth": "integer"}
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock(message=MagicMock(content='{"--depth": "integer"}'))]
-        mock_completion.return_value = mock_resp
+            # Mock litellm completion to return {"--depth": "integer"}
+            mock_resp = MagicMock()
+            mock_resp.choices = [MagicMock(message=MagicMock(content='{"--depth": "integer"}'))]
+            mock_completion.return_value = mock_resp
 
-        config = auto_discover_providers()
+            config = auto_discover_providers()
 
-        # Assertions
-        assert len(config["providers"]) == 1
-        provider = config["providers"][0]
-        assert provider["name"] == "ollama"
-        assert "supported_args" in provider
-        assert provider["supported_args"] == {"--depth": "integer"}
+            # Assertions
+            assert len(config["providers"]) == 1
+            provider = config["providers"][0]
+            assert provider["name"] == "ollama"
+            assert "supported_args" in provider
+            assert provider["supported_args"] == {"--depth": "integer"}

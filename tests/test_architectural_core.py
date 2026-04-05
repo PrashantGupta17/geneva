@@ -40,12 +40,9 @@ def test_key_inference(monkeypatch):
 
 # 2. test_coercion_layer
 def test_coercion_layer():
-    # Mock the litellm completion to return {"count": 42}
-    with mock.patch("core.coercer.completion") as mock_completion:
-        mock_response = mock.Mock()
-        mock_response.choices = [mock.Mock()]
-        mock_response.choices[0].message.content = '{"count": 42}'
-        mock_completion.return_value = mock_response
+    # Mock the invoke_master_llm to return {"count": 42}
+    with mock.patch("core.coercer.invoke_master_llm") as mock_invoke:
+        mock_invoke.return_value = '{"count": 42}'
 
         coercer = DataCoercer(model="gpt-4-turbo")
         raw_text = "Analysis complete. The final count is 42."

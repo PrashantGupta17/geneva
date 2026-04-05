@@ -80,12 +80,12 @@ def auto_discover_providers() -> Dict[str, Any]:
     # Validate the selected provider
     print(f"[Bootstrap] Validating {selected_provider['name']}...")
     if selected_provider["type"] == "api":
-        from litellm import completion
+        from core.meta_llm import invoke_master_llm
         try:
             # 1-token completion
-            completion(
-                model=selected_provider["litellm_model_name"],
-                messages=[{"role": "user", "content": "Hello"}],
+            invoke_master_llm(
+                prompt="Hello",
+                provider_override=selected_provider,
                 max_tokens=1
             )
             print("[Bootstrap] Validation successful.")
@@ -102,18 +102,18 @@ def auto_discover_providers() -> Dict[str, Any]:
             print(f"[Bootstrap] Extracting capabilities for CLI {selected_provider['name']}...")
             help_res = subprocess.run(f"{selected_provider['absolute_path']} --help", shell=True, capture_output=True, text=True)
             if help_res.stdout or help_res.stderr:
-                from litellm import completion
-                # Assuming another provider exists as master, or use fallback if possible, but bootstrap says "Pass the stdout to the Master LLM"
-                # Since we are setting it up now, let's use the default or just GPT-4 if OPENAI_API_KEY is present
+                from core.meta_llm import invoke_master_llm
                 master_model = "gpt-4-turbo" if os.environ.get("OPENAI_API_KEY") else "gpt-3.5-turbo"
+                temp_provider = {"type": "api", "litellm_model_name": master_model}
                 try:
                     help_prompt = f"Extract the supported flags and capabilities of this CLI into a JSON schema (e.g., -d / --depth, --format).\n\n{help_res.stdout}\n{help_res.stderr}"
-                    resp = completion(
-                        model=master_model,
-                        messages=[{"role": "user", "content": help_prompt}],
-                        response_format={"type": "json_object"}
+
+                    schema_str = invoke_master_llm(
+                        prompt=help_prompt,
+                        response_format={"type": "json_object"},
+                        provider_override=temp_provider
                     )
-                    schema_str = resp.choices[0].message.content
+
                     selected_provider["supported_args"] = json.loads(schema_str)
                     print(f"[Bootstrap] Successfully extracted supported_args.")
                 except Exception as e:

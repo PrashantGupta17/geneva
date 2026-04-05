@@ -7,7 +7,7 @@ from memory.reflection import ReflectionMemory
 from core.registry import ProviderRegistry
 
 # Optional litellm import to generate DSL via API
-from litellm import completion
+from core.meta_llm import invoke_master_llm
 
 class PlannerAgent:
     def __init__(self, model: str = "gpt-4-turbo"):
@@ -65,16 +65,14 @@ Past successful examples (use these to optimize your layout if provided):
 Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schema. No markdown wrapping.
 """
         try:
-            response = completion(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Problem: {problem_description}"}
-                ],
+            import re
+            full_prompt = f"{system_prompt}\n\nUser Problem: {problem_description}"
+            content = invoke_master_llm(
+                prompt=full_prompt,
                 response_format={ "type": "json_object" }
             )
 
-            content = response.choices[0].message.content
+            content = re.sub(r'^```json\s*|```$', '', content, flags=re.MULTILINE).strip()
             dsl_dict = json.loads(content)
             dsl = ProjectDSL(**dsl_dict)
             return dsl
@@ -99,16 +97,14 @@ User Feedback:
 Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schema. No markdown wrapping.
 """
         try:
-            response = completion(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Please update the DSL based on my feedback."}
-                ],
+            import re
+            full_prompt = f"{system_prompt}\n\nUser Feedback: Please update the DSL based on my feedback."
+            content = invoke_master_llm(
+                prompt=full_prompt,
                 response_format={ "type": "json_object" }
             )
 
-            content = response.choices[0].message.content
+            content = re.sub(r'^```json\s*|```$', '', content, flags=re.MULTILINE).strip()
             dsl_dict = json.loads(content)
             dsl = ProjectDSL(**dsl_dict)
             return dsl

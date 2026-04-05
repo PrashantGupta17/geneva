@@ -1,6 +1,7 @@
 import os
 import uuid
 import yaml
+from typing import Any
 
 class StorageManager:
     def __init__(self, config_path: str = "geneva_config.yaml", threshold: int = 1000):
@@ -34,3 +35,23 @@ class StorageManager:
             return f"path://{filepath}"
 
         return payload
+
+def resolve_payload(payload: Any) -> Any:
+    """
+    Recursively resolves payload paths (path://) into raw text.
+    """
+    if isinstance(payload, str) and payload.startswith("path://"):
+        filepath = payload.replace("path://", "")
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception as e:
+                print(f"[Storage] Failed to read {filepath}: {e}")
+                return payload
+        return payload
+    elif isinstance(payload, dict):
+        return {k: resolve_payload(v) for k, v in payload.items()}
+    elif isinstance(payload, list):
+        return [resolve_payload(item) for item in payload]
+    return payload
