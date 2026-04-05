@@ -226,7 +226,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                         content = f.read()
 
                 data_dict = state.get("data", {}).copy()
-                data_dict[f"{stage.stage_name}_output"] = content
+                if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
+                data_dict[stage.stage_name]["output"] = content
                 return {"data": data_dict}
 
             if stage.stage_type == "ephemeral_code":
@@ -249,7 +250,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     worker_output, worker_cost = handle.get_result()
 
                 data_dict = state.get("data", {}).copy()
-                data_dict[f"{stage.stage_name}_output"] = worker_output
+                if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
+                data_dict[stage.stage_name]["output"] = worker_output
                 return {"data": data_dict}
 
             if stage.stage_type == "parallel_fanout":
@@ -272,7 +274,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     pass
 
             # Standard LLM (or fallback)
-            current_spent = state.get("data", {}).get(f"{stage.stage_name}_eval_cost", 0.0)
+            current_spent = state.get("data", {}).get(stage.stage_name, {}).get("eval_cost", 0.0)
 
             base_prompt = "Perform the required task based on project data."
             routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
@@ -294,9 +296,11 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 worker_output, worker_cost = handle.get_result()
 
             data_dict = state.get("data", {}).copy()
-            current_cost = data_dict.get(f"{stage.stage_name}_eval_cost", 0.0)
-            data_dict[f"{stage.stage_name}_eval_cost"] = current_cost + worker_cost
-            data_dict[f"{stage.stage_name}_output"] = worker_output
+            current_cost = data_dict.get(stage.stage_name, {}).get("eval_cost", 0.0)
+            if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
+            data_dict[stage.stage_name]["eval_cost"] = current_cost + worker_cost
+            if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
+            data_dict[stage.stage_name]["output"] = worker_output
 
             # If it's a parallel fanout that was sent to this node, we should append to experiment_results
             # But wait, if this IS the fanout, and the router sends here...
@@ -320,13 +324,14 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 experiment_results = state.get("experiment_results", {})
                 worker_output = json.dumps(experiment_results)
             else:
-                worker_output = data.get(f"{stage.stage_name}_output", "")
+                worker_output = data.get(stage.stage_name, {}).get("output", "")
 
             passes, eval_cost = evaluator_agent.evaluate(stage, worker_output)
 
-            data[f"{stage.stage_name}_passed"] = passes
-            current_cost = data.get(f"{stage.stage_name}_eval_cost", 0.0)
-            data[f"{stage.stage_name}_eval_cost"] = current_cost + eval_cost
+            if stage.stage_name not in data: data[stage.stage_name] = {}
+            data[stage.stage_name]["passed"] = passes
+            current_cost = data.get(stage.stage_name, {}).get("eval_cost", 0.0)
+            data[stage.stage_name]["eval_cost"] = current_cost + eval_cost
 
             if not passes:
                 print(f"Evaluation FAILED. Incrementing loop counter to {stage_loops + 1}.")
@@ -340,7 +345,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             }
 
             if stage.stage_type == "parallel_fanout":
-                data[f"{stage.stage_name}_output"] = worker_output
+                data[stage.stage_name]["output"] = worker_output
                 result_state["experiment_results"] = {}
                 result_state["data"] = data
 
@@ -356,7 +361,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             thread_id = state.get("project_name", "unknown")
             iteration_index = state.get("eval_loops", {}).get(stage.stage_name, 0)
 
-            current_spent = state.get("data", {}).get(f"{stage.stage_name}_eval_cost", 0.0)
+            current_spent = state.get("data", {}).get(stage.stage_name, {}).get("eval_cost", 0.0)
 
             base_prompt = "Perform the required task based on project data."
             routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
@@ -386,8 +391,9 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     total_worker_cost += res.get("cost", 0.0)
 
             data_dict = state.get("data", {}).copy()
-            current_cost = data_dict.get(f"{stage.stage_name}_eval_cost", 0.0)
-            data_dict[f"{stage.stage_name}_eval_cost"] = current_cost + total_worker_cost
+            current_cost = data_dict.get(stage.stage_name, {}).get("eval_cost", 0.0)
+            if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
+            data_dict[stage.stage_name]["eval_cost"] = current_cost + total_worker_cost
 
             return {
                 "experiment_results": experiment_results,
@@ -436,7 +442,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 loops_dict = state.get("eval_loops", {})
                 stage_loops = loops_dict.get(current_stage.stage_name, 0)
 
-                pass_flag = state.get("data", {}).get(f"{current_stage.stage_name}_passed", False)
+                pass_flag = state.get("data", {}).get(current_stage.stage_name, {}).get("passed", False)
                 if not pass_flag:
                     if stage_loops <= current_stage.max_retries:
                         # Retry current stage

@@ -99,7 +99,7 @@ def test_parallel_thread_pool():
                     assert "provider2" in result["experiment_results"]
                     assert result["experiment_results"]["provider1"]["output"] == "mocked_output"
                     assert "data" in result
-                    assert result["data"].get("parallel_test_eval_cost") == 0.2 # 0.1 * 2
+                    assert result["data"].get("parallel_test", {}).get("eval_cost") == 0.2 # 0.1 * 2
                 break
     finally:
         os.remove(dsl_path)

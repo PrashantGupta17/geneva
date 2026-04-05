@@ -90,8 +90,8 @@ def test_evaluator_fanout_routing(mock_eval):
 
     # Assert state cleared correctly and mapped to output
     assert new_state["experiment_results"] == {}
-    assert new_state["data"]["test_fanout_output"] == expected_output
-    assert new_state["data"]["test_fanout_passed"] is True
+    assert new_state["data"].get("test_fanout", {}).get("output") == expected_output
+    assert new_state["data"].get("test_fanout", {}).get("passed") is True
 
 @patch("compiler.builder.completion")
 def test_api_kwargs_passing(mock_completion):
