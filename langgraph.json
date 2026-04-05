@@ -1,7 +1,0 @@
-{
-  "dependencies": ["."],
-  "graphs": {
-    "orchestrator_graph": "./compiler/builder.py:graph"
-  },
-  "env": ".env"
-}

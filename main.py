@@ -3,12 +3,26 @@ from agents.planner import PlannerAgent
 from memory.reflection import ReflectionMemory
 from compiler.builder import build_graph, OverallState
 from dbos import DBOS
+from core.bootstrap import auto_discover_providers
 
 def main():
+    # Bootstrap and get config
+    config = auto_discover_providers()
+
+    # Identify master planner model
+    master_provider_name = config.get("master_planner")
+    master_model = "openrouter/auto" # default fallback
+    for p in config.get("providers", []):
+        if p["name"] == master_provider_name:
+            if p["type"] == "api":
+                master_model = p["litellm_model_name"]
+            else:
+                master_model = p["name"] # Or something that planner can use
+
     # Make sure DBOS is running for @DBOS.step calls inside the graph
     DBOS.launch()
 
-    planner = PlannerAgent(model="openrouter/auto") # Use whatever model is configured
+    planner = PlannerAgent(model=master_model)
     memory = ReflectionMemory()
 
     while True:
@@ -50,7 +64,9 @@ def main():
                     "data": {},
                     "eval_loops": {},
                     "max_loops": dsl.max_loops,
-                    "global_budget": dsl.global_budget
+                    "global_budget": dsl.global_budget,
+                    "experiment_results": [],
+                    "ingestion_path": None
                 }
 
                 thread_config = {"configurable": {"thread_id": thread_id}}
@@ -61,11 +77,36 @@ def main():
                     # execution. However, we are running steps inside graph.
                     # As a workaround or basic sync, we use the same thread_id as the langgraph thread.
                     # And DBOS automatically manages its internal IDs. If we really need DBOS to use it, we could pass it.
-                    final_state = graph.invoke(initial_state, thread_config)
-                    print("\n[CLI] Graph execution completed successfully!")
+                    current_state = initial_state
+                    while True:
+                        final_state = graph.invoke(current_state, thread_config)
 
-                    print("[CLI] Storing success in Reflection Memory...")
-                    memory.store_success(problem_description, dsl)
+                        # Check for interrupts
+                        state_snapshot = graph.get_state(thread_config)
+                        if state_snapshot and getattr(state_snapshot, "next", None):
+                            # It's an interrupt
+                            node_to_run = state_snapshot.next[0]
+                            # Check if it's a data ingestion interrupt
+                            # LangGraph allows inspecting the graph structure or state to see why it paused.
+                            # In our logic, if it's data_ingestion and path is empty, we would pause.
+                            # We added `interrupt_before` for human approval or data ingestion.
+
+                            # Let's prompt the user
+                            user_input = input(f"\n[Interrupt] Graph paused at '{node_to_run}'.\nEnter 'approve' to continue, or provide a file path for data ingestion: ").strip()
+
+                            if os.path.exists(user_input):
+                                graph.update_state(thread_config, {"ingestion_path": user_input})
+                                current_state = None # To resume from checkpoint
+                            elif user_input.lower() == 'approve':
+                                current_state = None
+                            else:
+                                print("[CLI] Invalid input, trying to resume anyway.")
+                                current_state = None
+                        else:
+                            print("\n[CLI] Graph execution completed successfully!")
+                            print("[CLI] Storing success in Reflection Memory...")
+                            memory.store_success(problem_description, dsl)
+                            break
 
                 except Exception as e:
                     print(f"\n[CLI] Error during graph execution: {e}")

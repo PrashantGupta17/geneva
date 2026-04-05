@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field
 
 class StageDSL(BaseModel):
@@ -8,6 +8,13 @@ class StageDSL(BaseModel):
     success_criteria: Dict[str, Any] = Field(..., description="Strict schema/criteria for output validation")
     requires_human_approval: bool = Field(default=False, description="Whether this stage requires human approval to proceed")
     max_retries: int = Field(default=3, description="Maximum number of retries if evaluation fails")
+
+    stage_type: Literal["standard_llm", "parallel_fanout", "ephemeral_code", "data_ingestion"] = "standard_llm"
+    capability: Literal["text", "deep_research", "image_gen", "data_processing"] = "text"
+    tool_args: Dict[str, Any] = Field(default_factory=dict)
+    input_schema: Optional[Dict] = None
+    ephemeral_script: Optional[str] = None
+    target_providers: Optional[List[str]] = None
 
 class ProjectDSL(BaseModel):
     project_name: str = Field(..., description="Name of the overall project")
