@@ -1,0 +1,8 @@
+providers:
+- name: ollama
+  type: cli
+  absolute_path: /usr/bin/ollama
+  test_command: /usr/bin/ollama --version
+  supported_args:
+    --depth: integer
+master_planner: ollama

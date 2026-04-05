@@ -1,5 +1,15 @@
-from typing import List, Dict, Any, Optional, Literal
+import operator
+from typing import List, Dict, Any, Optional, Literal, Annotated
 from pydantic import BaseModel, Field
+
+def dict_merge_or_clear(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    # If explicitly passed an empty dictionary, clear the state.
+    # Otherwise, merge keys.
+    if new == {}:
+        return {}
+    merged = old.copy() if old else {}
+    merged.update(new)
+    return merged
 
 class StageDSL(BaseModel):
     stage_name: str = Field(..., description="Name of the project stage")

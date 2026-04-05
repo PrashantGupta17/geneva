@@ -6,9 +6,9 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import MemorySaver
-import sqlite3
-from langgraph.checkpoint.sqlite import SqliteSaver
-from core.schemas import ProjectDSL, StageDSL
+from psycopg_pool import ConnectionPool
+from langgraph.checkpoint.postgres import PostgresSaver
+from core.schemas import ProjectDSL, StageDSL, dict_merge_or_clear
 from agents.evaluator import StageAwareRouter, EvaluatorNode
 from dbos import DBOS
 from langgraph.types import Send
@@ -40,15 +40,24 @@ load_providers_from_config()
 
 # External tool wrapped with DBOS.step for durability
 @DBOS.step()
-def execute_external_api(stage_name: str, provider_info: dict, prompt: str) -> Tuple[str, float]:
+def execute_external_api(stage_name: str, provider_info: dict, prompt: str, tool_args: Dict = None) -> Tuple[str, float]:
     print(f"[DBOS] Executing API LLM call for '{stage_name}'...")
     model_name = provider_info.get("litellm_model_name", "gpt-3.5-turbo")
+
+    tool_args = tool_args or {}
+
+    # Filter for valid LiteLLM kwargs
+    valid_kwargs = ["temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty", "response_format", "seed", "tools", "tool_choice"]
+    filtered_tool_args = {k: v for k, v in tool_args.items() if k in valid_kwargs}
+
+    if "temperature" not in filtered_tool_args:
+        filtered_tool_args["temperature"] = 0.0
 
     try:
         response = completion(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0
+            **filtered_tool_args
         )
         output = response.choices[0].message.content
         try:
@@ -61,9 +70,11 @@ def execute_external_api(stage_name: str, provider_info: dict, prompt: str) -> T
         return f"Error: {e}", 0.0
 
 @DBOS.step()
-def execute_external_cli(stage_name: str, provider_info: dict, prompt: str) -> Tuple[str, float]:
+def execute_external_cli(stage_name: str, provider_info: dict, prompt: str, tool_args: Dict = None) -> Tuple[str, float]:
     print(f"[DBOS] Executing CLI command for '{stage_name}'...")
     cli_path = provider_info.get("absolute_path", "")
+
+    tool_args = tool_args or {}
 
     try:
         # Pass the prompt to the CLI using a standard approach (e.g., echo prompt | cli or pass as arg)
@@ -73,8 +84,10 @@ def execute_external_cli(stage_name: str, provider_info: dict, prompt: str) -> T
             f.write(prompt)
             temp_path = f.name
 
+        cli_args_str = " ".join([f"{k} {v}" if v else f"{k}" for k, v in tool_args.items()])
+
         result = subprocess.run(
-            f"{cli_path} < \"{temp_path}\"",
+            f"{cli_path} {cli_args_str} < \"{temp_path}\"",
             shell=True,
             capture_output=True,
             text=True
@@ -124,19 +137,14 @@ def universal_step(stage_name: str, routed_tier: str, prompt: str, iteration_ind
     provider_info = registry.get_provider(provider_name)
 
     if provider_info and provider_info["type"] == "cli":
-        cli_args = ""
-        if tool_args:
-            cli_args = " " + " ".join([f"--{k} {v}" for k, v in tool_args.items()])
-
-        modified_prompt = prompt + cli_args
-        output, cost = execute_external_cli(stage_name, provider_info, modified_prompt)
+        output, cost = execute_external_cli(stage_name, provider_info, prompt, tool_args)
     else:
         model_name = "gpt-4-turbo" if routed_tier == "premium" else "gpt-3.5-turbo"
         if provider_info and provider_info["type"] == "api":
             model_name = provider_info.get("litellm_model_name", model_name)
 
         mock_provider = {"type": "api", "litellm_model_name": model_name}
-        output, cost = execute_external_api(stage_name, mock_provider, prompt)
+        output, cost = execute_external_api(stage_name, mock_provider, prompt, tool_args)
 
     final_output = persist_if_large_step(output)
     return final_output, cost
@@ -153,7 +161,7 @@ class OverallState(TypedDict):
     eval_loops: Dict[str, int]
     max_loops: int
     global_budget: float
-    experiment_results: Annotated[list, operator.add]
+    experiment_results: Annotated[Dict[str, Any], dict_merge_or_clear]
     ingestion_path: Optional[str]
 
 def load_dsl(filepath: str) -> ProjectDSL:
@@ -279,12 +287,9 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 # Pass tool_args properly
                 provider_info = registry.get_provider(routed_tier)
                 if provider_info and provider_info["type"] == "cli":
-                    cli_args = ""
-                    if stage.tool_args:
-                        cli_args = " " + " ".join([f"--{k} {v}" for k, v in stage.tool_args.items()])
-                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt + cli_args)
+                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt, stage.tool_args)
                 else:
-                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt)
+                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt, stage.tool_args)
                 worker_output = persist_if_large_step.__wrapped__(output)
             else:
                 handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args)
@@ -309,13 +314,18 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             print(f"\n--- Evaluating: {stage.stage_name} ---")
 
             # Phase 4: LLM-as-a-judge
-            worker_output = state.get("data", {}).get(f"{stage.stage_name}_output", "")
+            data = state.get("data", {}).copy()
+            current_loops = state.get("eval_loops", {}).copy()
+            stage_loops = current_loops.get(stage.stage_name, 0)
+
+            if stage.stage_type == "parallel_fanout":
+                experiment_results = state.get("experiment_results", {})
+                worker_output = json.dumps(experiment_results)
+            else:
+                worker_output = data.get(f"{stage.stage_name}_output", "")
 
             passes, cost = evaluator_agent.evaluate(stage, worker_output)
 
-            current_loops = state.get("eval_loops", {}).copy()
-            stage_loops = current_loops.get(stage.stage_name, 0)
-            data = state.get("data", {}).copy()
             data[f"{stage.stage_name}_passed"] = passes
             data[f"{stage.stage_name}_eval_cost"] = cost
 
@@ -325,10 +335,17 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 return {"eval_loops": current_loops, "data": data}
 
             print(f"Evaluation PASSED.")
-            return {
+            result_state = {
                 "current_stage_index": state.get("current_stage_index", 0) + 1,
                 "data": data
             }
+
+            if stage.stage_type == "parallel_fanout":
+                data[f"{stage.stage_name}_output"] = worker_output
+                result_state["experiment_results"] = {}
+                result_state["data"] = data
+
+            return result_state
         return evaluator
 
     # Fanout helper node
@@ -346,19 +363,16 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 print(f"[DBOS Mock] Bypassing DBOS workflow invocation for test environment.")
                 provider_info = registry.get_provider(provider_name)
                 if provider_info and provider_info["type"] == "cli":
-                    cli_args = ""
-                    if stage.tool_args:
-                        cli_args = " " + " ".join([f"--{k} {v}" for k, v in stage.tool_args.items()])
-                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt + cli_args)
+                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt, stage.tool_args)
                 else:
-                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt)
+                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt, stage.tool_args)
                 worker_output = persist_if_large_step.__wrapped__(output)
             else:
                 handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args, provider_override=provider_name)
                 worker_output, worker_cost = handle.get_result()
 
             return {
-                "experiment_results": [{"provider": provider_name, "output": worker_output, "cost": worker_cost}]
+                "experiment_results": {provider_name: {"output": worker_output, "cost": worker_cost}}
             }
         return fanout_worker
 
@@ -468,12 +482,36 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 interrupt_nodes.append(f"worker_{stage.stage_name}")
 
     # 4. Compile Graph
-    conn = sqlite3.connect("geneva_persistence.db", check_same_thread=False)
-    checkpointer = SqliteSaver(conn)
-    checkpointer.setup()
-    graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
+    # Database Unification: LangGraph + DBOS on Postgres
+    dbos_url = os.environ.get("DBOS_DATABASE_URL")
+    if not dbos_url:
+        try:
+            with open("dbos-config.yaml", "r") as f:
+                dbos_cfg = yaml.safe_load(f)
+                db_cfg = dbos_cfg.get("database", {})
+                host = db_cfg.get("hostname", "localhost")
+                port = db_cfg.get("port", 5432)
+                user = db_cfg.get("username", "postgres")
+                password = db_cfg.get("password", "password")
+                dbname = db_cfg.get("app_db_name", "dbos")
+                dbos_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        except Exception:
+            dbos_url = "postgresql://postgres:password@localhost:5432/dbos"
+
+    if os.environ.get("DBOS_DISABLE") != "1":
+        pool = ConnectionPool(conninfo=dbos_url)
+        checkpointer = PostgresSaver(pool)
+        checkpointer.setup()
+        graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
+    else:
+        # Mock for tests
+        checkpointer = MemorySaver()
+        graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
 
     return graph
 
 # This instance is what LangGraph Studio looks for
-graph = build_graph("project_dsl.yaml")
+if os.environ.get("DBOS_DISABLE") != "1":
+    graph = build_graph("project_dsl.yaml")
+else:
+    graph = None

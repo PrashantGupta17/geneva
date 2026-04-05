@@ -2,6 +2,7 @@ import os
 import shutil
 import re
 import yaml
+import json
 from typing import Dict, Any
 
 def auto_discover_providers() -> Dict[str, Any]:
@@ -96,6 +97,27 @@ def auto_discover_providers() -> Dict[str, Any]:
         try:
             subprocess.run(selected_provider["test_command"], shell=True, check=True, capture_output=True)
             print("[Bootstrap] Validation successful.")
+
+            # Phase 3: CLI Intelligence - extract flags via --help
+            print(f"[Bootstrap] Extracting capabilities for CLI {selected_provider['name']}...")
+            help_res = subprocess.run(f"{selected_provider['absolute_path']} --help", shell=True, capture_output=True, text=True)
+            if help_res.stdout or help_res.stderr:
+                from litellm import completion
+                # Assuming another provider exists as master, or use fallback if possible, but bootstrap says "Pass the stdout to the Master LLM"
+                # Since we are setting it up now, let's use the default or just GPT-4 if OPENAI_API_KEY is present
+                master_model = "gpt-4-turbo" if os.environ.get("OPENAI_API_KEY") else "gpt-3.5-turbo"
+                try:
+                    help_prompt = f"Extract the supported flags and capabilities of this CLI into a JSON schema (e.g., -d / --depth, --format).\n\n{help_res.stdout}\n{help_res.stderr}"
+                    resp = completion(
+                        model=master_model,
+                        messages=[{"role": "user", "content": help_prompt}],
+                        response_format={"type": "json_object"}
+                    )
+                    schema_str = resp.choices[0].message.content
+                    selected_provider["supported_args"] = json.loads(schema_str)
+                    print(f"[Bootstrap] Successfully extracted supported_args.")
+                except Exception as e:
+                    print(f"[Bootstrap] Failed to parse --help: {e}")
         except Exception as e:
             print(f"[Bootstrap] Validation failed: {e}")
 
