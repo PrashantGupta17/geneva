@@ -26,7 +26,7 @@ class ReflectionMemory:
 
         self.collection.add(
             documents=[natural_language_prompt],
-            metadatas=[{"yaml_dsl": yaml_content, "project_name": final_dsl.project_name}],
+            metadatas=[{"yaml_dsl": yaml_content, "project_name": final_dsl.project_name, "thread_id": final_dsl.thread_id or "", "parent_thread_id": final_dsl.parent_thread_id or ""}],
             ids=[doc_id]
         )
         print(f"Stored successful project '{final_dsl.project_name}' in ChromaDB.")
