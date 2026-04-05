@@ -1,8 +1,10 @@
 import json
 import logging
 from typing import Dict, Any, Tuple
-from litellm import completion, get_llm_provider, completion_cost
+from litellm import completion_cost
+from core.meta_llm import invoke_master_llm
 from core.schemas import StageDSL
+from utils.storage import resolve_payload
 
 # Setup simple logger
 logging.basicConfig(level=logging.INFO)
@@ -15,32 +17,21 @@ class StageAwareRouter:
     """
     def __init__(self, config_path: str = "litellm_config.yaml"):
         self.config_path = config_path
-        # In a real scenario, this would track virtual keys and their spend.
-        # Since we are mocking the virtual key tracking for this example,
-        # we will simulate budget tracking locally.
-        self.mock_budget_spent: Dict[str, float] = {}
 
-    def get_remaining_budget_percent(self, stage: StageDSL) -> float:
+    def get_remaining_budget_percent(self, stage: StageDSL, current_spent: float) -> float:
         """
-        Mock function to represent querying LiteLLM for remaining budget on a Virtual Key.
+        Query LiteLLM (or state) for remaining budget on a Virtual Key.
         """
-        # Simulated spend
-        spent = self.mock_budget_spent.get(stage.stage_name, 0.0)
-        remaining = stage.stage_budget - spent
+        remaining = stage.stage_budget - current_spent
         percent_remaining = (remaining / stage.stage_budget) * 100 if stage.stage_budget > 0 else 0
         return percent_remaining
 
-    def update_budget(self, stage: StageDSL, cost: float):
-        """Simulated budget update after an API call."""
-        current_spent = self.mock_budget_spent.get(stage.stage_name, 0.0)
-        self.mock_budget_spent[stage.stage_name] = current_spent + cost
-
-    def prepare_routing(self, stage: StageDSL, prompt: str) -> Tuple[str, str]:
+    def prepare_routing(self, stage: StageDSL, prompt: str, current_spent: float = 0.0) -> Tuple[str, str]:
         """
         Checks budget and determines the model and prompt constraints.
         Returns: (model_tier_to_use, modified_prompt)
         """
-        percent_remaining = self.get_remaining_budget_percent(stage)
+        percent_remaining = self.get_remaining_budget_percent(stage, current_spent)
         logger.info(f"Stage '{stage.stage_name}' Budget Remaining: {percent_remaining:.1f}%")
 
         model_tier = stage.assigned_model_tier
@@ -72,6 +63,9 @@ class EvaluatorNode:
         Evaluates the worker's output against the success criteria.
         Returns True if it passes, False otherwise.
         """
+        # Phase 3: Resolve payload
+        resolved_output = resolve_payload(worker_output)
+
         # Convert success criteria dict to a formatted string
         criteria_str = json.dumps(stage.success_criteria, indent=2)
 
@@ -87,24 +81,24 @@ If it fails in any way, reply with EXACTLY "FAIL".
         try:
             logger.info(f"Evaluating output for stage '{stage.stage_name}'...")
 
-            # Note: We rely on the user having litellm set up.
-            # If standard litellm is not configured or fails, it throws an exception, and we return False.
-            response = completion(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Worker Output:\n{worker_output}"}
-                ],
-                temperature=0.0
-            )
+            if stage.stage_type == "parallel_fanout":
+                # Context-Safe Evaluator limit logic
+                # We do not evaluate the full experiment results dump
+                # Instead, check if it's a valid dictionary with keys
+                system_prompt += "\nNote: This is a parallel fanout result. Simply check if the provided dictionary contains valid execution keys (provider names) and outputs."
+                output_str = str(list(resolved_output.keys())) if isinstance(resolved_output, dict) else str(resolved_output)[:500]
+            else:
+                output_str = str(resolved_output)
 
-            result = response.choices[0].message.content.strip().upper()
+            full_prompt = f"{system_prompt}\n\nWorker Output:\n{output_str}"
+            content = invoke_master_llm(prompt=full_prompt)
 
-            passed = (result == "PASS")
-            try:
-                cost = completion_cost(completion_response=response)
-            except Exception:
-                cost = 0.0
+            result = content.strip().upper()
+
+            # Use basic matching to check if passes
+            passed = ("PASS" in result)
+            cost = 0.0 # Evaluator uses meta LLM which could be local CLI, cost is handled separately or 0.0
+
             logger.info(f"Evaluation result for '{stage.stage_name}': {'PASS' if passed else 'FAIL'}, Cost: {cost}")
             return passed, cost
 

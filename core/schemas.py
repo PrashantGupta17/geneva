@@ -31,3 +31,4 @@ class ProjectDSL(BaseModel):
     stages: List[StageDSL] = Field(..., description="List of stages in the project")
     global_budget: float = Field(..., description="Overall budget for the project in dollars")
     max_loops: int = Field(default=10, description="Maximum total evaluation loops allowed across all stages")
+    thread_id: Optional[str] = None

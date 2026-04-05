@@ -45,7 +45,10 @@ def main():
         print(f"\n[CLI] Initial Project DSL generated and saved to {dsl_filename}.")
 
         import uuid
-        thread_id = str(uuid.uuid4())
+        if not dsl.thread_id:
+            dsl.thread_id = str(uuid.uuid4())
+            planner.write_dsl_to_yaml(dsl, filename=dsl_filename)
+        thread_id = dsl.thread_id
         print(f"[CLI] Generated Thread ID for this project: {thread_id}")
 
         # Interactive loop for execution approval and refinement
@@ -94,14 +97,14 @@ def main():
                             # Let's prompt the user
                             user_input = input(f"\n[Interrupt] Graph paused at '{node_to_run}'.\nEnter 'approve' to continue, or provide a file path for data ingestion: ").strip()
 
-                            if os.path.exists(user_input):
+                            if user_input.startswith("http://") or user_input.startswith("https://") or os.path.exists(user_input):
                                 graph.update_state(thread_config, {"ingestion_path": user_input})
                                 current_state = None # To resume from checkpoint
                             elif user_input.lower() == 'approve':
                                 current_state = None
                             else:
-                                print("[CLI] Invalid input, trying to resume anyway.")
-                                current_state = None
+                                print(f"[CLI] Invalid input '{user_input}'. Must be 'approve', a valid URL, or an existing local path. Try again.")
+                                # Do not set current_state to None to loop again
                         else:
                             print("\n[CLI] Graph execution completed successfully!")
                             print("[CLI] Storing success in Reflection Memory...")

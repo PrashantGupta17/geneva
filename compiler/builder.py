@@ -272,13 +272,11 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     pass
 
             # Standard LLM (or fallback)
-            base_prompt = "Perform the required task based on project data."
-            routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt)
-            print(f"Worker Routed Model Tier: {routed_tier}")
+            current_spent = state.get("data", {}).get(f"{stage.stage_name}_eval_cost", 0.0)
 
-            eval_cost_spent = state.get("data", {}).get(f"{stage.stage_name}_eval_cost", 0.0)
-            if eval_cost_spent > 0:
-                router.update_budget(stage, cost=eval_cost_spent)
+            base_prompt = "Perform the required task based on project data."
+            routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
+            print(f"Worker Routed Model Tier: {routed_tier}")
 
             workflow_id = f"{thread_id}_{stage.stage_name}_{routed_tier}_{iteration_index}"
 
@@ -295,9 +293,9 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args)
                 worker_output, worker_cost = handle.get_result()
 
-            router.update_budget(stage, cost=worker_cost)
-
             data_dict = state.get("data", {}).copy()
+            current_cost = data_dict.get(f"{stage.stage_name}_eval_cost", 0.0)
+            data_dict[f"{stage.stage_name}_eval_cost"] = current_cost + worker_cost
             data_dict[f"{stage.stage_name}_output"] = worker_output
 
             # If it's a parallel fanout that was sent to this node, we should append to experiment_results
@@ -324,10 +322,11 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             else:
                 worker_output = data.get(f"{stage.stage_name}_output", "")
 
-            passes, cost = evaluator_agent.evaluate(stage, worker_output)
+            passes, eval_cost = evaluator_agent.evaluate(stage, worker_output)
 
             data[f"{stage.stage_name}_passed"] = passes
-            data[f"{stage.stage_name}_eval_cost"] = cost
+            current_cost = data.get(f"{stage.stage_name}_eval_cost", 0.0)
+            data[f"{stage.stage_name}_eval_cost"] = current_cost + eval_cost
 
             if not passes:
                 print(f"Evaluation FAILED. Incrementing loop counter to {stage_loops + 1}.")
@@ -348,51 +347,59 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             return result_state
         return evaluator
 
-    # Fanout helper node
-    def create_fanout_worker_node(stage: StageDSL, provider_name: str):
+    # Phase 4: The Parallel Rewrite - Fanout helper node
+    def create_fanout_worker_node(stage: StageDSL):
         def fanout_worker(state: OverallState):
-            print(f"\n--- Executing Parallel Fanout Worker: {stage.stage_name} on {provider_name} ---")
+            import concurrent.futures
+
+            print(f"\n--- Executing Parallel Fanout Worker: {stage.stage_name} ---")
             thread_id = state.get("project_name", "unknown")
             iteration_index = state.get("eval_loops", {}).get(stage.stage_name, 0)
 
-            base_prompt = "Perform the required task based on project data."
-            routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt)
-            workflow_id = f"{thread_id}_{stage.stage_name}_{provider_name}_{iteration_index}"
+            current_spent = state.get("data", {}).get(f"{stage.stage_name}_eval_cost", 0.0)
 
-            if os.environ.get("DBOS_DISABLE") == "1":
-                print(f"[DBOS Mock] Bypassing DBOS workflow invocation for test environment.")
-                provider_info = registry.get_provider(provider_name)
-                if provider_info and provider_info["type"] == "cli":
-                    output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt, stage.tool_args)
+            base_prompt = "Perform the required task based on project data."
+            routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
+
+            def execute_for_provider(provider_name: str):
+                workflow_id = f"{thread_id}_{stage.stage_name}_{provider_name}_{iteration_index}"
+                if os.environ.get("DBOS_DISABLE") == "1":
+                    provider_info = registry.get_provider(provider_name)
+                    if provider_info and provider_info.get("type") == "cli":
+                        output, worker_cost = execute_external_cli.__wrapped__(stage.stage_name, provider_info, modified_prompt, stage.tool_args)
+                    else:
+                        output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt, stage.tool_args)
+                    worker_output = persist_if_large_step.__wrapped__(output)
+                    return provider_name, {"output": worker_output, "cost": worker_cost}
                 else:
-                    output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt, stage.tool_args)
-                worker_output = persist_if_large_step.__wrapped__(output)
-            else:
-                handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args, provider_override=provider_name)
-                worker_output, worker_cost = handle.get_result()
+                    handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args, provider_override=provider_name)
+                    worker_output, worker_cost = handle.get_result()
+                    return provider_name, {"output": worker_output, "cost": worker_cost}
+
+            experiment_results = {}
+            total_worker_cost = 0.0
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = {executor.submit(execute_for_provider, p): p for p in (stage.target_providers or [])}
+                for future in concurrent.futures.as_completed(futures):
+                    p_name, res = future.result()
+                    experiment_results[p_name] = res
+                    total_worker_cost += res.get("cost", 0.0)
+
+            data_dict = state.get("data", {}).copy()
+            current_cost = data_dict.get(f"{stage.stage_name}_eval_cost", 0.0)
+            data_dict[f"{stage.stage_name}_eval_cost"] = current_cost + total_worker_cost
 
             return {
-                "experiment_results": {provider_name: {"output": worker_output, "cost": worker_cost}}
+                "experiment_results": experiment_results,
+                "data": data_dict
             }
         return fanout_worker
-
-    # Fanout routing edge
-    def create_fanout_router(stage: StageDSL):
-        def route_fanout(state: OverallState):
-            sends = []
-            for provider in (stage.target_providers or []):
-                # Send to a dynamically generated node or mapped node
-                node_name = f"worker_{stage.stage_name}_{provider}"
-                sends.append(Send(node_name, state))
-            return sends
-        return route_fanout
 
     # 2. Add Nodes to Graph
     for i, stage in enumerate(stages):
         if stage.stage_type == "parallel_fanout":
-            for provider in (stage.target_providers or []):
-                node_name = f"worker_{stage.stage_name}_{provider}"
-                builder.add_node(node_name, create_fanout_worker_node(stage, provider))
+            node_name = f"worker_parallel_fanout_{stage.stage_name}"
+            builder.add_node(node_name, create_fanout_worker_node(stage))
         else:
             worker_name = f"worker_{stage.stage_name}"
             builder.add_node(worker_name, create_worker_node(stage))
@@ -405,9 +412,9 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
         builder.add_edge(START, END)
         return builder.compile(checkpointer=MemorySaver())
 
-    # START to first worker (or router if fanout)
+    # START to first worker
     if stages[0].stage_type == "parallel_fanout":
-        builder.add_conditional_edges(START, create_fanout_router(stages[0]))
+        builder.add_edge(START, f"worker_parallel_fanout_{stages[0].stage_name}")
     else:
         builder.add_edge(START, f"worker_{stages[0].stage_name}")
 
@@ -416,10 +423,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
         # Worker goes to Evaluator
         if stage.stage_type == "parallel_fanout":
-            # All parallel branches go to the evaluator
-            for provider in (stage.target_providers or []):
-                node_name = f"worker_{stage.stage_name}_{provider}"
-                builder.add_edge(node_name, eval_name)
+            node_name = f"worker_parallel_fanout_{stage.stage_name}"
+            builder.add_edge(node_name, eval_name)
         else:
             worker_name = f"worker_{stage.stage_name}"
             builder.add_edge(worker_name, eval_name)
@@ -429,12 +434,6 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             is_last = (current_index + 1 == len(stages))
             def route(state: OverallState):
                 loops_dict = state.get("eval_loops", {})
-
-                total_loops = sum(loops_dict.values())
-                if total_loops > state.get("max_loops", 10):
-                    print(f"Global loop safety triggered: total_loops ({total_loops}) > max_loops ({state.get('max_loops', 10)}).")
-                    return END
-
                 stage_loops = loops_dict.get(current_stage.stage_name, 0)
 
                 pass_flag = state.get("data", {}).get(f"{current_stage.stage_name}_passed", False)
@@ -474,12 +473,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
     interrupt_nodes = []
     for stage in stages:
         if stage.requires_human_approval or stage.stage_type == "data_ingestion":
-            # We'll pause before the worker runs
-            if stage.stage_type == "parallel_fanout":
-                for p in (stage.target_providers or []):
-                    interrupt_nodes.append(f"worker_{stage.stage_name}_{p}")
-            else:
-                interrupt_nodes.append(f"worker_{stage.stage_name}")
+            # UX Interrupt Reversal: Pause before the evaluator runs so user can see output first
+            interrupt_nodes.append(f"evaluator_{stage.stage_name}")
 
     # 4. Compile Graph
     # Database Unification: LangGraph + DBOS on Postgres

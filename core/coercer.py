@@ -1,6 +1,6 @@
 import json
 from typing import Dict, Any
-from litellm import completion
+from core.meta_llm import invoke_master_llm
 
 class CoercionError(Exception):
     pass
@@ -19,16 +19,14 @@ Target Schema:
 {json.dumps(target_schema, indent=2)}
 """
         try:
-            response = completion(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": raw_text}
-                ],
+            import re
+            full_prompt = f"{system_prompt}\n\nUser Input: {raw_text}"
+            content = invoke_master_llm(
+                prompt=full_prompt,
                 response_format={"type": "json_object"}
             )
 
-            content = response.choices[0].message.content
+            content = re.sub(r'^```json\s*|```$', '', content, flags=re.MULTILINE).strip()
             parsed_data = json.loads(content)
             return parsed_data
         except Exception as e:

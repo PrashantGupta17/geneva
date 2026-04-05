@@ -11,5 +11,4 @@ stage = StageDSL(
     max_retries=3
 )
 print(router.prepare_routing(stage, "Hello"))
-router.update_budget(stage, 0.9)
-print(router.prepare_routing(stage, "Hello"))
+print(router.prepare_routing(stage, "Hello", current_spent=0.9))
