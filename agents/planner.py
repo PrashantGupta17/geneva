@@ -4,6 +4,7 @@ import os
 from typing import Dict, Any
 from core.schemas import ProjectDSL, StageDSL
 from memory.reflection import ReflectionMemory
+from core.registry import ProviderRegistry
 
 # Optional litellm import to generate DSL via API
 from litellm import completion
@@ -12,9 +13,20 @@ class PlannerAgent:
     def __init__(self, model: str = "gpt-4-turbo"):
         self.model = model
         self.memory = ReflectionMemory()
+        self.registry = ProviderRegistry()
+
+    def _load_providers(self):
+        config_path = "geneva_config.yaml"
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f) or {}
+                return [p["name"] for p in config.get("providers", [])]
+        return []
 
     def generate_dsl(self, problem_description: str) -> ProjectDSL:
         past_examples = self.memory.retrieve_similar_projects(problem_description)
+        providers = self._load_providers()
+        providers_list = ", ".join(providers) if providers else "None found"
 
         system_prompt = f"""
 You are an expert Lead Systems Architect Planner.
@@ -27,6 +39,13 @@ You must autonomously decide:
 4. Strict Pydantic-based success criteria (as JSON schema dictionaries) for each stage.
 5. Whether human-in-the-loop (HITL) checkpoints are required (requires_human_approval).
 6. A stage_budget for each stage, summing up to global_budget.
+
+Available Providers: {providers_list}
+
+Additional Rules:
+- If the user asks for a comparison or study across multiple models, you MUST use stage_type: "parallel_fanout" and populate target_providers with available providers.
+- If data requires deterministic processing (math, sorting, cleaning), you MUST use stage_type: "ephemeral_code", write the Python script in ephemeral_script, and define the input_schema.
+- Your ephemeral_script MUST read input from sys.stdin (which will be a JSON string) and print the final output to sys.stdout.
 
 Here are the Pydantic schemas you must conform to:
 {ProjectDSL.schema_json(indent=2)}
