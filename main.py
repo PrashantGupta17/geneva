@@ -26,6 +26,35 @@ def get_status_from_graph(graph, thread_id):
         return status, active_pid
     return "IDLE", None
 
+def display_projects():
+    print("\n[CLI] Listing projects...")
+    projects_dir = "projects"
+    if not os.path.exists(projects_dir):
+        os.makedirs(projects_dir)
+    indexed_projects = []
+    for filename in os.listdir(projects_dir):
+        if filename.endswith(".yaml"):
+            try:
+                filepath = os.path.join(projects_dir, filename)
+                with open(filepath, "r") as f:
+                    data = yaml.safe_load(f)
+                    if data:
+                        from core.schemas import ProjectDSL
+                        dsl = ProjectDSL(**data)
+                        t_id = dsl.thread_id
+                        name = dsl.project_name
+                        orig = dsl.original_problem
+
+                        graph = build_graph(filepath)
+                        status, _ = get_status_from_graph(graph, t_id)
+                        indexed_projects.append((t_id, name, orig, status))
+            except Exception:
+                pass
+
+    for i, (t_id, name, orig, status) in enumerate(indexed_projects):
+        print(f" {i+1}. {name} (ID: {t_id}) | {orig[:30]}... | Status: {status}")
+    return indexed_projects
+
 def main():
 
     # Phase 5: Repository Hygiene
@@ -187,32 +216,7 @@ def main():
             break
 
         if user_input.startswith("/list"):
-            print("\n[CLI] Listing projects...")
-            projects_dir = "projects"
-            indexed_projects = []
-            for filename in os.listdir(projects_dir):
-                if filename.endswith(".yaml"):
-                    try:
-                        filepath = os.path.join(projects_dir, filename)
-                        with open(filepath, "r") as f:
-                            data = yaml.safe_load(f)
-                            if data:
-                                dsl = ProjectDSL(**data)
-                                t_id = dsl.thread_id
-                                name = dsl.project_name
-                                orig = dsl.original_problem
-
-                                graph = build_graph(filepath)
-                                status, _ = get_status_from_graph(graph, t_id)
-                                indexed_projects.append((t_id, name, orig, status))
-                    except Exception as e:
-                        pass
-
-            for i, (t_id, name, orig, status) in enumerate(indexed_projects):
-                print(f" {i+1}. {name} (ID: {t_id}) | {orig[:30]}... | Status: {status}")
-
-            # Store it globally or within the loop scope for attach/fork
-            globals()["indexed_projects_cache"] = indexed_projects
+            globals()["indexed_projects_cache"] = display_projects()
             continue
 
         if user_input.startswith("/attach"):
@@ -221,6 +225,7 @@ def main():
             if len(parts) > 1:
                 t_id = parts[1]
             else:
+                globals()["indexed_projects_cache"] = display_projects()
                 idx_str = input("Enter the project number to attach: ").strip()
                 try:
                     idx = int(idx_str) - 1
@@ -255,6 +260,7 @@ def main():
             if len(parts) > 1:
                 parent_id = parts[1]
             else:
+                globals()["indexed_projects_cache"] = display_projects()
                 idx_str = input("Enter the project number to fork: ").strip()
                 try:
                     idx = int(idx_str) - 1
@@ -359,7 +365,8 @@ def main():
             index = None
             if len(parts) > 1:
                 try:
-                    index = int(parts[1])
+                    # Standardize: Convert the 1-based input to a 0-based index.
+                    index = int(parts[1]) - 1
                 except ValueError:
                     print("Invalid index.")
                     continue
@@ -375,7 +382,7 @@ def main():
 
                 idx_str = input("Enter the stage number to rewind to: ").strip()
                 try:
-                    # Execute: Convert the 1-based input to a 0-based index.
+                    # Standardize: Convert the 1-based input to a 0-based index.
                     index = int(idx_str) - 1
                 except ValueError:
                     print("Please enter a valid number.")
@@ -388,8 +395,23 @@ def main():
                         print("Killed paused process to avoid stale memory on resume.")
 
                     stage_name = active_dsl.stages[index].stage_name
-                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}}, as_node=f"evaluator_{stage_name}")
-                    print(f"[CLI] Rewound project {active_thread_id} to stage index {index}.")
+                    # Secure the rewind: fetch existing data to prevent overwriting other stages
+                    state = graph.get_state(thread_config)
+                    current_data = state.values.get("data", {}).copy() if state and state.values else {}
+                    if stage_name not in current_data:
+                        current_data[stage_name] = {}
+                    current_data[stage_name]["passed"] = False
+                    
+                    # Increment loop counter to guarantee a fresh iteration index for DBOS (forced replay)
+                    current_loops = state.values.get("eval_loops", {}).copy() if state and state.values else {}
+                    current_loops[stage_name] = current_loops.get(stage_name, 0) + 1
+                    
+                    graph.update_state(thread_config, {
+                        "data": current_data, 
+                        "eval_loops": current_loops,
+                        "status": "PAUSED"
+                    }, as_node=f"evaluator_{stage_name}")
+                    print(f"[CLI] Rewound project {active_thread_id} to stage index {index+1} ({stage_name}). Status is PAUSED.")
                 except (ValueError, IndexError):
                     print("Invalid index.")
             continue
