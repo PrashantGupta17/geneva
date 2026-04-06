@@ -17,6 +17,7 @@ import subprocess
 from litellm import completion, completion_cost
 from typing import Tuple, Optional
 import json
+import hashlib
 
 from core.registry import ProviderRegistry
 from utils.storage import StorageManager
@@ -108,6 +109,16 @@ def execute_external_cli(stage_name: str, provider_info: dict, prompt: str, tool
 def persist_if_large_step(payload: str) -> str:
     # Use StorageManager to check and persist
     return storage_manager.persist_if_large(payload)
+
+def get_content_hash(prompt: str, model: str, tool_args: Dict) -> str:
+    """Creates a SHA256 hash of the prompt string, model tier, and serialized tool arguments."""
+    payload = {
+        "prompt": prompt,
+        "model": model,
+        "tool_args": tool_args or {}
+    }
+    payload_str = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
 
 @DBOS.step()
 def execute_ephemeral_code(stage_name: str, script: str, input_data: dict) -> Tuple[str, float]:
@@ -234,8 +245,13 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 # Phase 6.2: ephemeral_code Execution
                 print(f"Executing ephemeral code...")
                 # Find previous stage output as data
-                # We can just pass the entire state data dictionary to coercer
-                raw_data = json.dumps(state.get("data", {}))
+                # Only pass the previous stage's output to keep the context window lean
+                previous_output = ""
+                if i > 0:
+                    prev_stage_name = stages[i - 1].stage_name
+                    previous_output = state.get("data", {}).get(prev_stage_name, {}).get("output", "")
+
+                raw_data = json.dumps(previous_output)
 
                 try:
                     coerced_data = coercer.sanitize_for_computation(raw_data, stage.input_schema or {})
@@ -245,7 +261,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 if os.environ.get("DBOS_DISABLE") == "1":
                     worker_output, worker_cost = execute_ephemeral_code.__wrapped__(stage.stage_name, stage.ephemeral_script, coerced_data)
                 else:
-                    workflow_id = f"{thread_id}_{stage.stage_name}_code_{iteration_index}"
+                    content_hash = get_content_hash(stage.ephemeral_script, "code", coerced_data)
+                    workflow_id = f"{stage.stage_name}_{content_hash}_iter{iteration_index}"
                     handle = DBOS.start_workflow(execute_ephemeral_code, workflow_id=workflow_id, stage_name=stage.stage_name, script=stage.ephemeral_script, input_data=coerced_data)
                     worker_output, worker_cost = handle.get_result()
 
@@ -280,7 +297,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
             print(f"Worker Routed Model Tier: {routed_tier}")
 
-            workflow_id = f"{thread_id}_{stage.stage_name}_{routed_tier}_{iteration_index}"
+            content_hash = get_content_hash(modified_prompt, routed_tier, stage.tool_args)
+            workflow_id = f"{stage.stage_name}_{content_hash}_iter{iteration_index}"
 
             if os.environ.get("DBOS_DISABLE") == "1":
                 print(f"[DBOS Mock] Bypassing DBOS workflow invocation for test environment.")
@@ -367,7 +385,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             routed_tier, modified_prompt = router.prepare_routing(stage, base_prompt, current_spent)
 
             def execute_for_provider(provider_name: str):
-                workflow_id = f"{thread_id}_{stage.stage_name}_{provider_name}_{iteration_index}"
+                content_hash = get_content_hash(modified_prompt, provider_name, stage.tool_args)
+                workflow_id = f"{stage.stage_name}_{content_hash}_iter{iteration_index}"
                 if os.environ.get("DBOS_DISABLE") == "1":
                     provider_info = registry.get_provider(provider_name)
                     if provider_info and provider_info.get("type") == "cli":

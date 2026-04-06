@@ -49,3 +49,4 @@ class OverallState(TypedDict):
     ingestion_path: Optional[str]
     active_pid: Optional[int]
     status: Literal["IDLE", "RUNNING", "PAUSED", "COMPLETED", "CRASHED"]
+    dsl_hash: Optional[str]

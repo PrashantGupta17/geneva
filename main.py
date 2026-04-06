@@ -155,12 +155,15 @@ def main():
                 file_dsl = ProjectDSL(**yaml.safe_load(f))
                 current_file_hash = hashlib.sha256(json.dumps([s.model_dump() for s in file_dsl.stages], sort_keys=True).encode()).hexdigest()
 
-            if current_file_hash != active_dsl.dsl_hash:
+            graph = build_graph(active_dsl_filename)
+            thread_config = {"configurable": {"thread_id": active_thread_id}}
+            state = graph.get_state(thread_config)
+            postgres_dsl_hash = state.values.get("dsl_hash") if state and state.values else None
+
+            if current_file_hash != active_dsl.dsl_hash or (postgres_dsl_hash and current_file_hash != postgres_dsl_hash):
                 print("[CLI] Hash mismatch! Tampering detected. Run /resync before resuming.")
                 continue
 
-            graph = build_graph(active_dsl_filename)
-            thread_config = {"configurable": {"thread_id": active_thread_id}}
             status, pid = get_status_from_graph(graph, active_thread_id)
 
             if status == "PAUSED":
@@ -196,9 +199,11 @@ def main():
                         os.kill(pid, signal.SIGKILL)
                         print("Killed paused process to avoid stale memory on resume.")
 
+                    stage_name = active_dsl.stages[index].stage_name
+                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}}, as_node=f"evaluator_{stage_name}")
                     graph.update_state(thread_config, {"current_stage_index": index})
                     print(f"[CLI] Rewound project {active_thread_id} to stage index {index}.")
-                except ValueError:
+                except (ValueError, IndexError):
                     print("Invalid index.")
             continue
 
@@ -211,6 +216,11 @@ def main():
             file_dsl.dsl_hash = current_file_hash
             active_dsl = file_dsl
             planner.write_dsl_to_yaml(file_dsl, filename=active_dsl_filename)
+
+            graph = build_graph(active_dsl_filename)
+            thread_config = {"configurable": {"thread_id": active_thread_id}}
+            graph.update_state(thread_config, {"dsl_hash": current_file_hash})
+
             print("[CLI] Project resynced to match on-disk file.")
             continue
 
@@ -257,7 +267,7 @@ def main():
             graph = build_graph(active_dsl_filename)
             status, _ = get_status_from_graph(graph, active_thread_id)
             if status == "RUNNING":
-                print("[CLI] ERROR: Cannot refine DSL while project is RUNNING. Please /pause first.")
+                print("Kernel Lock: Project is executing. You must run /pause before editing the DSL.")
                 continue
 
             with open(active_dsl_filename, "r") as f:
@@ -268,11 +278,14 @@ def main():
                 continue
 
             print(f"\n[CLI] Refining DSL based on feedback: '{user_input}'...")
-            active_dsl = planner.refine_dsl(active_dsl, user_input)
+            active_dsl = planner.refine_dsl(active_dsl, user_input, filename=active_dsl_filename)
 
             stages_dump = [s.model_dump() for s in active_dsl.stages]
             active_dsl.dsl_hash = hashlib.sha256(json.dumps(stages_dump, sort_keys=True).encode()).hexdigest()
             planner.write_dsl_to_yaml(active_dsl, filename=active_dsl_filename)
+
+            thread_config = {"configurable": {"thread_id": active_thread_id}}
+            graph.update_state(thread_config, {"dsl_hash": active_dsl.dsl_hash})
         else:
             print("\n[Planner] Querying memory for past examples and generating DSL...")
             dsl = planner.generate_dsl(user_input)
@@ -287,6 +300,12 @@ def main():
             planner.write_dsl_to_yaml(dsl, filename=dsl_filename)
 
             active_thread_id = dsl.thread_id
+
+            # Update graph state with initial hash
+            new_graph = build_graph(dsl_filename)
+            new_thread_config = {"configurable": {"thread_id": active_thread_id}}
+            new_graph.update_state(new_thread_config, {"dsl_hash": dsl.dsl_hash})
+
             active_dsl_filename = dsl_filename
             active_dsl = dsl
             print(f"\n[CLI] Initial Project DSL generated and saved to {dsl_filename}.")
