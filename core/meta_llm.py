@@ -13,7 +13,7 @@ def get_master_provider() -> dict:
             for p in config.get("providers", []):
                 if p["name"] == master_name:
                     return p
-    return {}
+    return {"type": "api", "litellm_model_name": "gpt-4-turbo"}
 
 def invoke_master_llm(prompt: str, response_format: dict = None, provider_override: dict = None, max_tokens: int = None) -> str:
     provider = provider_override or get_master_provider()

@@ -20,7 +20,7 @@ import json
 import hashlib
 
 from core.registry import ProviderRegistry
-from utils.storage import StorageManager
+from utils.storage import StorageManager, resolve_payload
 from core.coercer import DataCoercer
 
 registry = ProviderRegistry()
@@ -139,7 +139,7 @@ def execute_ephemeral_code(stage_name: str, script: str, input_data: dict) -> Tu
         return f"Error: {e}", 0.0
 
 @DBOS.workflow()
-def universal_step(stage_name: str, routed_tier: str, prompt: str, iteration_index: int, thread_id: str, tool_args: Optional[Dict] = None, provider_override: Optional[str] = None) -> Tuple[str, float]:
+def universal_step(stage_name: str, routed_tier: str, prompt: str, iteration_index: int, tool_args: Optional[Dict] = None, provider_override: Optional[str] = None) -> Tuple[str, float]:
     """
     Universal executor that handles routing to either CLI or API provider.
     Wrapped in a single DBOS.workflow to guarantee atomicity.
@@ -255,6 +255,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
                 try:
                     coerced_data = coercer.sanitize_for_computation(raw_data, stage.input_schema or {})
+                    coerced_data = resolve_payload(coerced_data)
                 except Exception as e:
                     coerced_data = {"error": str(e)}
 
@@ -310,7 +311,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     output, worker_cost = execute_external_api.__wrapped__(stage.stage_name, {"type": "api", "litellm_model_name": "gpt-3.5-turbo"}, modified_prompt, stage.tool_args)
                 worker_output = persist_if_large_step.__wrapped__(output)
             else:
-                handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args)
+                handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, tool_args=stage.tool_args)
                 worker_output, worker_cost = handle.get_result()
 
             data_dict = state.get("data", {}).copy()
@@ -396,7 +397,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     worker_output = persist_if_large_step.__wrapped__(output)
                     return provider_name, {"output": worker_output, "cost": worker_cost}
                 else:
-                    handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, thread_id=thread_id, tool_args=stage.tool_args, provider_override=provider_name)
+                    handle = DBOS.start_workflow(universal_step, workflow_id=workflow_id, stage_name=stage.stage_name, routed_tier=routed_tier, prompt=modified_prompt, iteration_index=iteration_index, tool_args=stage.tool_args, provider_override=provider_name)
                     worker_output, worker_cost = handle.get_result()
                     return provider_name, {"output": worker_output, "cost": worker_cost}
 

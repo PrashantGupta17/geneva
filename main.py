@@ -173,6 +173,7 @@ def main():
                     print(f"Project {active_thread_id} resumed.")
                 else:
                     print("Project process not found. Spawning a new background process...")
+                    graph.update_state(thread_config, {"active_pid": None})
                     process = subprocess.Popen(["python3", "-m", "compiler.runner", active_dsl_filename])
                     active_processes.append(process)
             else:
@@ -200,8 +201,7 @@ def main():
                         print("Killed paused process to avoid stale memory on resume.")
 
                     stage_name = active_dsl.stages[index].stage_name
-                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}}, as_node=f"evaluator_{stage_name}")
-                    graph.update_state(thread_config, {"current_stage_index": index})
+                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}, "current_stage_index": index}, as_node=f"evaluator_{stage_name}")
                     print(f"[CLI] Rewound project {active_thread_id} to stage index {index}.")
                 except (ValueError, IndexError):
                     print("Invalid index.")
