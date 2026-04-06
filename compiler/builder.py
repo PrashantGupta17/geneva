@@ -1,5 +1,6 @@
 import yaml
 import os
+import sqlite3
 from typing import Dict, Any, List, Annotated
 import operator
 from typing_extensions import TypedDict
@@ -243,6 +244,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
         builder.add_edge("waiting", END)
         # We need a persistent checkpointer for the fallback as well if we are standardizing
         conn = sqlite3.connect("geneva_persistence.db", check_same_thread=False)
+        from langgraph.checkpoint.sqlite import SqliteSaver
         checkpointer = SqliteSaver(conn)
         checkpointer.setup()
         return builder.compile(checkpointer=checkpointer)
