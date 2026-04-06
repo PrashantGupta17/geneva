@@ -103,15 +103,13 @@ def auto_discover_providers() -> Dict[str, Any]:
             help_res = subprocess.run(f"{selected_provider['absolute_path']} --help", shell=True, capture_output=True, text=True)
             if help_res.stdout or help_res.stderr:
                 from core.meta_llm import invoke_master_llm
-                master_model = "gpt-4-turbo" if os.environ.get("OPENAI_API_KEY") else "gpt-3.5-turbo"
-                temp_provider = {"type": "api", "litellm_model_name": master_model}
                 try:
                     help_prompt = f"Extract the supported flags and capabilities of this CLI into a JSON schema (e.g., -d / --depth, --format).\n\n{help_res.stdout}\n{help_res.stderr}"
 
                     schema_str = invoke_master_llm(
                         prompt=help_prompt,
                         response_format={"type": "json_object"},
-                        provider_override=temp_provider
+                        provider_override=selected_provider
                     )
 
                     selected_provider["supported_args"] = json.loads(schema_str)
