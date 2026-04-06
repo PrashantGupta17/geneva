@@ -27,6 +27,15 @@ def get_status_from_graph(graph, thread_id):
     return "IDLE", None
 
 def main():
+
+    # Phase 5: Repository Hygiene
+    for file in os.listdir('.'):
+        if file.startswith('patch_') or file.startswith('fix_') or file.startswith('update_'):
+            if file.endswith('.py'):
+                try:
+                    os.remove(file)
+                except Exception:
+                    pass
     if not os.path.exists("projects"):
         os.makedirs("projects")
 
@@ -64,6 +73,104 @@ def main():
         if not user_input:
             continue
 
+        if user_input.startswith("/config provider add "):
+            name = user_input.replace("/config provider add ", "").strip()
+            if name:
+                api_key = input(f"Enter the API key for {name}: ").strip()
+                # Secure Action: Write the key to the .env file
+                with open(".env", "a") as env_file:
+                    env_file.write(f"\n{name.upper()}_API_KEY={api_key}\n")
+
+                # Update geneva_config.yaml
+                if os.path.exists("geneva_config.yaml"):
+                    with open("geneva_config.yaml", "r") as config_file:
+                        config = yaml.safe_load(config_file) or {}
+                else:
+                    config = {}
+
+                if "providers" not in config:
+                    config["providers"] = []
+
+                # Check if provider already exists
+                exists = False
+                for p in config["providers"]:
+                    if p["name"] == name:
+                        exists = True
+                        break
+
+                if not exists:
+                    config["providers"].append({"name": name, "type": "api"})
+                    with open("geneva_config.yaml", "w") as config_file:
+                        yaml.dump(config, config_file, sort_keys=False)
+                    print(f"Provider '{name}' added successfully.")
+                else:
+                    print(f"Provider '{name}' already exists.")
+            continue
+
+        if user_input.startswith("/config model add"):
+            provider_name = input("Enter the provider name (e.g., groq): ").strip()
+            model_id = input("Enter the specific model ID (e.g., llama3-70b-8192): ").strip()
+
+            from core.meta_llm import invoke_master_llm
+            prompt = f"Categorize the model '{model_id}' from provider '{provider_name}'. Return ONLY a JSON object with keys: 'pool_name' (a generic capability name, e.g., 'llama-3-70b'), 'tier' (exactly one of: 'premium', 'standard', 'free'), and 'capabilities' (a list of strings like ['text', 'json', 'reasoning'])."
+
+            print("[Planner] Calling Master LLM to categorize the model...")
+            try:
+                response = invoke_master_llm(prompt, response_format={"type": "json_object"})
+                parsed_response = json.loads(response)
+
+                if os.path.exists("geneva_config.yaml"):
+                    with open("geneva_config.yaml", "r") as config_file:
+                        config = yaml.safe_load(config_file) or {}
+                else:
+                    config = {}
+
+                if "models" not in config:
+                    config["models"] = []
+
+                config["models"].append({
+                    "provider": provider_name,
+                    "model_id": model_id,
+                    "pool_name": parsed_response.get("pool_name", "unknown"),
+                    "tier": parsed_response.get("tier", "standard"),
+                    "capabilities": parsed_response.get("capabilities", [])
+                })
+
+                with open("geneva_config.yaml", "w") as config_file:
+                    yaml.dump(config, config_file, sort_keys=False)
+
+                print(f"Model '{model_id}' categorized and added successfully under pool '{parsed_response.get('pool_name', 'unknown')}'.")
+            except Exception as e:
+                print(f"Failed to categorize and add model: {e}")
+
+            continue
+
+        if user_input == "/config list":
+            if os.path.exists("geneva_config.yaml"):
+                with open("geneva_config.yaml", "r") as config_file:
+                    config = yaml.safe_load(config_file) or {}
+
+                print("\n[CLI] Configured Providers:")
+                for p in config.get("providers", []):
+                    print(f"  - {p['name']} ({p['type']})")
+
+                print("\n[CLI] Pooled Models:")
+                models_by_pool = {}
+                for m in config.get("models", []):
+                    pool = m.get("pool_name", "unknown")
+                    if pool not in models_by_pool:
+                        models_by_pool[pool] = []
+                    models_by_pool[pool].append(m)
+
+                for pool, models in models_by_pool.items():
+                    print(f"  Pool: {pool}")
+                    for m in models:
+                        caps = ", ".join(m.get("capabilities", []))
+                        print(f"    - {m['provider']}/{m['model_id']} (Tier: {m.get('tier')}, Capabilities: [{caps}])")
+            else:
+                print("No configuration found.")
+            continue
+
         if user_input.startswith("/detach"):
             print("[CLI] Detaching. Background processes will continue running.")
             active_processes = []
@@ -72,6 +179,7 @@ def main():
         if user_input.startswith("/list"):
             print("\n[CLI] Listing projects...")
             projects_dir = "projects"
+            indexed_projects = []
             for filename in os.listdir(projects_dir):
                 if filename.endswith(".yaml"):
                     try:
@@ -86,15 +194,40 @@ def main():
 
                                 graph = build_graph(filepath)
                                 status, _ = get_status_from_graph(graph, t_id)
-                                print(f" - {t_id} | {name} | {orig[:30]}... | Status: {status}")
+                                indexed_projects.append((t_id, name, orig, status))
                     except Exception as e:
                         pass
+
+            for i, (t_id, name, orig, status) in enumerate(indexed_projects):
+                print(f" {i+1}. {name} (ID: {t_id}) | {orig[:30]}... | Status: {status}")
+
+            # Store it globally or within the loop scope for attach/fork
+            globals()["indexed_projects_cache"] = indexed_projects
             continue
 
         if user_input.startswith("/attach"):
             parts = user_input.split(" ")
+            t_id = None
             if len(parts) > 1:
                 t_id = parts[1]
+            else:
+                idx_str = input("Enter the project number to attach: ").strip()
+                try:
+                    idx = int(idx_str) - 1
+                    cache = globals().get("indexed_projects_cache", [])
+                    if 0 <= idx < len(cache):
+                        t_id = cache[idx][0]
+                    else:
+                        print("Invalid project number.")
+                        continue
+                except ValueError:
+                    print("Please enter a valid number.")
+                    continue
+                except IndexError:
+                    print("Invalid project number.")
+                    continue
+
+            if t_id:
                 filepath = f"projects/{t_id}.yaml"
                 if os.path.exists(filepath):
                     with open(filepath, "r") as f:
@@ -108,8 +241,27 @@ def main():
 
         if user_input.startswith("/fork"):
             parts = user_input.split(" ")
+            parent_id = None
             if len(parts) > 1:
                 parent_id = parts[1]
+            else:
+                idx_str = input("Enter the project number to fork: ").strip()
+                try:
+                    idx = int(idx_str) - 1
+                    cache = globals().get("indexed_projects_cache", [])
+                    if 0 <= idx < len(cache):
+                        parent_id = cache[idx][0]
+                    else:
+                        print("Invalid project number.")
+                        continue
+                except ValueError:
+                    print("Please enter a valid number.")
+                    continue
+                except IndexError:
+                    print("Invalid project number.")
+                    continue
+
+            if parent_id:
                 parent_filename = f"projects/{parent_id}.yaml"
                 if os.path.exists(parent_filename):
                     with open(parent_filename, "r") as f:
@@ -184,24 +336,49 @@ def main():
             if not active_thread_id:
                 print("No active project.")
                 continue
+
+            graph = build_graph(active_dsl_filename)
+            thread_config = {"configurable": {"thread_id": active_thread_id}}
+            status, pid = get_status_from_graph(graph, active_thread_id)
+
+            if status == "RUNNING":
+                print("Cannot rewind while project is RUNNING. Please /pause first.")
+                continue
+
             parts = user_input.split(" ")
+            index = None
             if len(parts) > 1:
                 try:
                     index = int(parts[1])
-                    graph = build_graph(active_dsl_filename)
-                    thread_config = {"configurable": {"thread_id": active_thread_id}}
-                    status, pid = get_status_from_graph(graph, active_thread_id)
+                except ValueError:
+                    print("Invalid index.")
+                    continue
+            else:
+                state = graph.get_state(thread_config)
+                print("\n[CLI] Active Stages:")
+                for i, stage in enumerate(active_dsl.stages):
+                    passed = False
+                    if state and state.values:
+                        passed = state.values.get("data", {}).get(stage.stage_name, {}).get("passed", False)
+                    status_str = "PASSED" if passed else "PENDING/FAILED"
+                    print(f" {i+1}. {stage.stage_name} ({status_str})")
 
-                    if status == "RUNNING":
-                        print("Cannot rewind while project is RUNNING. Please /pause first.")
-                        continue
+                idx_str = input("Enter the stage number to rewind to: ").strip()
+                try:
+                    # Execute: Convert the 1-based input to a 0-based index.
+                    index = int(idx_str) - 1
+                except ValueError:
+                    print("Please enter a valid number.")
+                    continue
 
+            if index is not None:
+                try:
                     if status == "PAUSED" and pid and psutil.pid_exists(pid):
                         os.kill(pid, signal.SIGKILL)
                         print("Killed paused process to avoid stale memory on resume.")
 
                     stage_name = active_dsl.stages[index].stage_name
-                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}, "current_stage_index": index}, as_node=f"evaluator_{stage_name}")
+                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}}, as_node=f"evaluator_{stage_name}")
                     print(f"[CLI] Rewound project {active_thread_id} to stage index {index}.")
                 except (ValueError, IndexError):
                     print("Invalid index.")
@@ -222,6 +399,33 @@ def main():
             graph.update_state(thread_config, {"dsl_hash": current_file_hash})
 
             print("[CLI] Project resynced to match on-disk file.")
+            continue
+
+        if user_input.startswith("/status"):
+            if not active_thread_id:
+                print("No active project to show status for.")
+                continue
+
+            graph = build_graph(active_dsl_filename)
+            thread_config = {"configurable": {"thread_id": active_thread_id}}
+            state = graph.get_state(thread_config)
+
+            if not state or not state.values:
+                print("No state found for this project.")
+                continue
+
+            # Phase 4: LLM-Powered OS Dashboard
+            raw_state_json = json.dumps(state.values, default=str)
+            from core.meta_llm import invoke_master_llm
+            prompt = f"You are the Geneva OS Dashboard. Read this raw state JSON and provide a clean, concise summary of the project's progress. List the completed stages, the currently active stage, and the total budget spent. Do not expose the raw JSON.\n\n{raw_state_json}"
+
+            print("[Dashboard] Generating status report...")
+            try:
+                response = invoke_master_llm(prompt)
+                print(f"\n{response}")
+                print(f"\n[UI] To view visually, open LangGraph Studio and connect to local Postgres persistence for thread_id: {active_thread_id}.")
+            except Exception as e:
+                print(f"Failed to generate status report: {e}")
             continue
 
         if user_input.lower() == 'approve':
