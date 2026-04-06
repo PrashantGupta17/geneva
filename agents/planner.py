@@ -82,7 +82,17 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
             print("Falling back to a deterministic dummy DSL for testing purposes.")
             return self._fallback_dsl(problem_description)
 
-    def refine_dsl(self, current_dsl: ProjectDSL, user_feedback: str) -> ProjectDSL:
+    def refine_dsl(self, current_dsl: ProjectDSL, user_feedback: str, filename: str = None) -> ProjectDSL:
+        if current_dsl.thread_id:
+            from compiler.builder import build_graph
+            filepath = filename if filename else f"projects/{current_dsl.thread_id}.yaml"
+            graph = build_graph(filepath)
+            thread_config = {"configurable": {"thread_id": current_dsl.thread_id}}
+            state = graph.get_state(thread_config)
+            if state and state.values and state.values.get("status") == "RUNNING":
+                print("Kernel Lock: Project is executing. You must run /pause before editing the DSL.")
+                return current_dsl
+
         system_prompt = f"""
 You are an expert Lead Systems Architect Planner.
 The user has provided feedback to refine an existing Project DSL.
@@ -155,6 +165,15 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
         )
 
     def write_dsl_to_yaml(self, dsl: ProjectDSL, filename: str = "project_dsl.yaml"):
+        if dsl.thread_id:
+            from compiler.builder import build_graph
+            graph = build_graph(filename)
+            thread_config = {"configurable": {"thread_id": dsl.thread_id}}
+            state = graph.get_state(thread_config)
+            if state and state.values and state.values.get("status") == "RUNNING":
+                print("Kernel Lock: Project is executing. You must run /pause before editing the DSL.")
+                return
+
         with open(filename, "w") as f:
             yaml.dump(dsl.model_dump(), f, sort_keys=False)
         print(f"DSL successfully written to {filename}")
