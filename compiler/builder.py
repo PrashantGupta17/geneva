@@ -276,29 +276,25 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     if path.startswith("http"):
                         import requests
                         try:
-                            response = requests.get(path)
-                            response.raise_for_status()
-                            content = response.text
+                            content = requests.get(path).text
                         except Exception as e:
-                            print(f"Error fetching URL {path}: {e}")
                             content = f"Error fetching URL: {e}"
                     elif os.path.isdir(path):
-                        valid_exts = {".txt", ".md", ".csv", ".json", ".py"}
+                        content = ""
                         for root, _, files in os.walk(path):
-                            for file in files:
-                                if os.path.splitext(file)[1].lower() in valid_exts:
-                                    filepath = os.path.join(root, file)
+                            for f in files:
+                                if f.endswith((".txt", ".md", ".py", ".csv", ".json")):
                                     try:
-                                        with open(filepath, "r", encoding="utf-8") as f:
-                                            content += f.read() + "\n"
-                                    except Exception as e:
-                                        print(f"Error reading {filepath}: {e}")
-                    elif os.path.isfile(path):
+                                        with open(os.path.join(root, f), "r", encoding="utf-8") as file:
+                                            content += f"--- File: {f} ---\n{file.read()}\n\n"
+                                    except Exception:
+                                        continue
+                    else:
                         try:
                             with open(path, "r", encoding="utf-8") as f:
                                 content = f.read()
                         except Exception as e:
-                            print(f"Error reading file {path}: {e}")
+                            content = f"Error reading file: {e}"
 
                 data_dict = state.get("data", {}).copy()
                 if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
