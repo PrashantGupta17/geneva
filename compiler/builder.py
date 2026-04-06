@@ -269,19 +269,36 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 if not state.get("ingestion_path"):
                     print(f"Data ingestion path is empty. Interrupting...")
                     return {} # In a real interrupt, this would trigger langgraph interrupt_before. We just return state for now, main.py loop will handle it. Wait, the instructions say: "If so, return a state update that triggers an interrupt_before."
-                    # We'll return an empty update, which just relies on the interrupt_before configured during graph compilation. Wait, the actual node runs AFTER interrupt if it's in interrupt_before.
-                    # If it's empty, we might raise an exception or just return, but if it runs, we should just read it if it's there.
-                    # The instructions say: "Check if state.get('ingestion_path') is empty. If so, return a state update that triggers an interrupt_before." Wait, LangGraph interrupt_before is defined on compile.
-                    # But if we need to return an update, maybe we just return state. We can raise an error or just return empty. We will read it if available.
-                    # Actually, if it's empty, we return a state update that triggers something? Let's just return to wait, but LangGraph needs to be interrupted.
-                    # The simplest way to interrupt from a node in LangGraph is to raise NodeInterrupt or similar, but the instruction specifically says "return a state update that triggers an interrupt_before".
-                    # However, if we're in the node, `interrupt_before` already happened. We'll check if path is available.
 
                 path = state.get("ingestion_path")
                 content = ""
-                if path and os.path.exists(path):
-                    with open(path, "r") as f:
-                        content = f.read()
+                if path:
+                    if path.startswith("http"):
+                        import requests
+                        try:
+                            response = requests.get(path)
+                            response.raise_for_status()
+                            content = response.text
+                        except Exception as e:
+                            print(f"Error fetching URL {path}: {e}")
+                            content = f"Error fetching URL: {e}"
+                    elif os.path.isdir(path):
+                        valid_exts = {".txt", ".md", ".csv", ".json", ".py"}
+                        for root, _, files in os.walk(path):
+                            for file in files:
+                                if os.path.splitext(file)[1].lower() in valid_exts:
+                                    filepath = os.path.join(root, file)
+                                    try:
+                                        with open(filepath, "r", encoding="utf-8") as f:
+                                            content += f.read() + "\n"
+                                    except Exception as e:
+                                        print(f"Error reading {filepath}: {e}")
+                    elif os.path.isfile(path):
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                content = f.read()
+                        except Exception as e:
+                            print(f"Error reading file {path}: {e}")
 
                 data_dict = state.get("data", {}).copy()
                 if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
