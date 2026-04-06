@@ -53,8 +53,7 @@ Available Providers:
 Additional Rules:
 - For CLI providers, you must construct the tool_args using ONLY the exact flags listed in their supported_args.
 - If the user asks for a comparison or study across multiple models, you MUST use stage_type: "parallel_fanout" and populate target_providers with available providers.
-- If data requires deterministic processing (math, sorting, cleaning), you MUST use stage_type: "ephemeral_code", write the Python script in ephemeral_script, and define the input_schema.
-- Your ephemeral_script MUST read input from sys.stdin (which will be a JSON string) and print the final output to sys.stdout.
+- If data requires deterministic processing (math, sorting), OR if you need to call external APIs or orchestrate other agents (like Jules), you MUST use stage_type: 'ephemeral_code'. Write the Python script using standard libraries (like 'requests' or 'json') in ephemeral_script, and define the input_schema. The script MUST read input from sys.stdin and print the final output to sys.stdout.
 
 Here are the Pydantic schemas you must conform to:
 {ProjectDSL.schema_json(indent=2)}
@@ -93,12 +92,30 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
                 print("Kernel Lock: Project is executing. You must run /pause before editing the DSL.")
                 return current_dsl
 
+        providers_data = self._load_providers()
+        providers_list = ""
+        for p in providers_data:
+            providers_list += f"- {p['name']} (Type: {p.get('type')})\n"
+            if 'supported_args' in p:
+                providers_list += f"  Supported Args Schema: {json.dumps(p['supported_args'])}\n"
+
+        if not providers_list:
+            providers_list = "None found"
+
         system_prompt = f"""
 You are an expert Lead Systems Architect Planner.
 The user has provided feedback to refine an existing Project DSL.
 Your job is to read the existing DSL and the user's natural language feedback, and output a new, updated strict JSON representation of the Project DSL.
 
 If this is a fork (indicated by the user mentioning it or preserving cache hits), you MUST preserve Stage Name, Prompts, and Ephemeral Code EXACTLY as they are whenever possible to maximize DBOS cache hits. Only modify the components specifically requested by the user.
+
+Available Providers:
+{providers_list}
+
+Additional Rules:
+- For CLI providers, you must construct the tool_args using ONLY the exact flags listed in their supported_args.
+- If the user asks for a comparison or study across multiple models, you MUST use stage_type: "parallel_fanout" and populate target_providers with available providers.
+- If data requires deterministic processing (math, sorting), OR if you need to call external APIs or orchestrate other agents (like Jules), you MUST use stage_type: 'ephemeral_code'. Write the Python script using standard libraries (like 'requests' or 'json') in ephemeral_script, and define the input_schema. The script MUST read input from sys.stdin and print the final output to sys.stdout.
 
 Current DSL:
 {current_dsl.model_dump_json(indent=2)}
