@@ -39,6 +39,22 @@ def load_providers_from_config(config_path="geneva_config.yaml"):
 
 load_providers_from_config()
 
+from litellm import Router
+
+# Initialize litellm.Router
+model_list = []
+if os.path.exists("geneva_config.yaml"):
+    with open("geneva_config.yaml", "r") as f:
+        config = yaml.safe_load(f) or {}
+        models = config.get("models", [])
+        model_list = [{"model_name": m["pool_name"], "litellm_params": {"model": f"{m['provider']}/{m['model_id']}"}} for m in models]
+
+if model_list:
+    litellm_router = Router(model_list=model_list, num_retries=2)
+else:
+    litellm_router = None
+
+
 # External tool wrapped with DBOS.step for durability
 @DBOS.step()
 def execute_external_api(stage_name: str, provider_info: dict, prompt: str, tool_args: Dict = None) -> Tuple[str, float]:
@@ -55,11 +71,19 @@ def execute_external_api(stage_name: str, provider_info: dict, prompt: str, tool
         filtered_tool_args["temperature"] = 0.0
 
     try:
-        response = completion(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            **filtered_tool_args
-        )
+        # Use litellm_router if available and we are using pool_name as model_name
+        if litellm_router and any(m["model_name"] == model_name for m in model_list):
+            response = litellm_router.completion(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                **filtered_tool_args
+            )
+        else:
+            response = completion(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                **filtered_tool_args
+            )
         output = response.choices[0].message.content
         try:
             cost = completion_cost(completion_response=response)
@@ -112,9 +136,25 @@ def persist_if_large_step(payload: str) -> str:
 
 def get_content_hash(prompt: str, model: str, tool_args: Dict) -> str:
     """Creates a SHA256 hash of the prompt string, model tier, and serialized tool arguments."""
+    # Phase 2: Ensure the model parameter used in the hash is the generic pool_name
+    # to allow cache hits across providers.
+
+    # Check if the model is actually a specific provider model and resolve it to pool_name if possible.
+    pool_name = model
+    if 'litellm_router' in globals() and litellm_router:
+        for m in model_list:
+            # If the model passed matches a pool name, use it
+            if m["model_name"] == model:
+                pool_name = model
+                break
+            # If it matches a specific provider/model, resolve to pool_name
+            elif m["litellm_params"]["model"] == model:
+                pool_name = m["model_name"]
+                break
+
     payload = {
         "prompt": prompt,
-        "model": model,
+        "model": pool_name,
         "tool_args": tool_args or {}
     }
     payload_str = json.dumps(payload, sort_keys=True)
@@ -153,6 +193,11 @@ def universal_step(stage_name: str, routed_tier: str, prompt: str, iteration_ind
         model_name = "gpt-4-turbo" if routed_tier == "premium" else "gpt-3.5-turbo"
         if provider_info and provider_info["type"] == "api":
             model_name = provider_info.get("litellm_model_name", model_name)
+
+        # In the context of pooled load balancing, routed_tier is often the pool_name
+        # We should pass routed_tier as the model name to use the router properly
+        if litellm_router and any(m["model_name"] == routed_tier for m in model_list):
+            model_name = routed_tier
 
         mock_provider = {"type": "api", "litellm_model_name": model_name}
         output, cost = execute_external_api(stage_name, mock_provider, prompt, tool_args)
