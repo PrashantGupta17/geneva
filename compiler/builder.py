@@ -302,7 +302,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
                 data_dict = state.get("data", {}).copy()
                 if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
-                data_dict[stage.stage_name]["output"] = content
+                data_dict[stage.stage_name]["output"] = storage_manager.persist_if_large(content)
                 return {"data": data_dict}
 
             if stage.stage_type == "ephemeral_code":
@@ -315,7 +315,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     prev_stage_name = stages[i - 1].stage_name
                     previous_output = state.get("data", {}).get(prev_stage_name, {}).get("output", "")
 
-                raw_data = json.dumps(previous_output)
+                resolved_previous = resolve_payload(previous_output)
+                raw_data = json.dumps(resolved_previous) if not isinstance(resolved_previous, str) else resolved_previous
 
                 try:
                     coerced_data = coercer.sanitize_for_computation(raw_data, stage.input_schema or {})
@@ -333,7 +334,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
                 data_dict = state.get("data", {}).copy()
                 if stage.stage_name not in data_dict: data_dict[stage.stage_name] = {}
-                data_dict[stage.stage_name]["output"] = worker_output
+                data_dict[stage.stage_name]["output"] = storage_manager.persist_if_large(worker_output)
                 return {"data": data_dict}
 
             if stage.stage_type == "parallel_fanout":
@@ -405,7 +406,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
 
             if stage.stage_type == "parallel_fanout":
                 experiment_results = state.get("experiment_results", {})
-                worker_output = json.dumps(experiment_results)
+                worker_output = json.dumps(resolve_payload(experiment_results))
             else:
                 worker_output = data.get(stage.stage_name, {}).get("output", "")
 

@@ -20,17 +20,25 @@ class PlannerAgent:
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 config = yaml.safe_load(f) or {}
-                return config.get("providers", [])
-        return []
+                return config
+        return {}
 
     def generate_dsl(self, problem_description: str) -> ProjectDSL:
         past_examples = self.memory.retrieve_similar_projects(problem_description)
-        providers_data = self._load_providers()
+        config_data = self._load_providers()
+        providers_data = config_data.get("providers", [])
+        models_data = config_data.get("models", [])
         providers_list = ""
+
         for p in providers_data:
-            providers_list += f"- {p['name']} (Type: {p.get('type')})\n"
+            providers_list += f"- Provider: {p['name']} (Type: {p.get('type')})\n"
             if 'supported_args' in p:
                 providers_list += f"  Supported Args Schema: {json.dumps(p['supported_args'])}\n"
+
+        for m in models_data:
+            capabilities = m.get('capabilities', [])
+            capabilities_str = f"['{capabilities[0]}', '{capabilities[1]}']" if len(capabilities) > 1 else f"['{capabilities[0]}']" if capabilities else "[]"
+            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Capabilities: {capabilities_str})\n"
 
         if not providers_list:
             providers_list = "None found"
@@ -92,12 +100,20 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
                 print("Kernel Lock: Project is executing. You must run /pause before editing the DSL.")
                 return current_dsl
 
-        providers_data = self._load_providers()
+        config_data = self._load_providers()
+        providers_data = config_data.get("providers", [])
+        models_data = config_data.get("models", [])
         providers_list = ""
+
         for p in providers_data:
-            providers_list += f"- {p['name']} (Type: {p.get('type')})\n"
+            providers_list += f"- Provider: {p['name']} (Type: {p.get('type')})\n"
             if 'supported_args' in p:
                 providers_list += f"  Supported Args Schema: {json.dumps(p['supported_args'])}\n"
+
+        for m in models_data:
+            capabilities = m.get('capabilities', [])
+            capabilities_str = f"['{capabilities[0]}', '{capabilities[1]}']" if len(capabilities) > 1 else f"['{capabilities[0]}']" if capabilities else "[]"
+            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Capabilities: {capabilities_str})\n"
 
         if not providers_list:
             providers_list = "None found"
