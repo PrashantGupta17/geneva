@@ -7,3 +7,6 @@ chromadb
 pydantic
 pyyaml
 requests
+langgraph-checkpoint-postgres
+psycopg[binary]
+psutil

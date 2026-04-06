@@ -56,11 +56,21 @@ def main():
     active_dsl_filename = None
     active_dsl = None
     active_processes = []
+    cached_graph = None
+    cached_graph_filename = None
 
     while True:
         print("\n" + "="*50)
 
-        prompt_prefix = f"[{active_thread_id}] " if active_thread_id else ""
+        if active_thread_id:
+            if cached_graph_filename != active_dsl_filename:
+                cached_graph = build_graph(active_dsl_filename)
+                cached_graph_filename = active_dsl_filename
+            status, _ = get_status_from_graph(cached_graph, active_thread_id)
+            prompt_prefix = f"[{active_thread_id} | {status}] "
+        else:
+            prompt_prefix = ""
+
         user_input = input(f"{prompt_prefix}Enter command (/list, /attach <id>, /fork <id>, /detach, /pause, /resume, /rewind <index>, /resync, approve, reject) or a new problem/feedback (or 'quit'): ").strip()
 
         if user_input.lower() == 'quit':
