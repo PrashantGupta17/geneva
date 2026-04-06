@@ -531,10 +531,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                     if stage_loops <= current_stage.max_retries:
                         # Retry current stage
                         if current_stage.stage_type == "parallel_fanout":
-                            sends = []
-                            for p in (current_stage.target_providers or []):
-                                sends.append(Send(f"worker_{current_stage.stage_name}_{p}", state))
-                            return sends
+                            return f"worker_parallel_fanout_{current_stage.stage_name}"
                         else:
                             return f"worker_{current_stage.stage_name}"
                     else:
@@ -546,10 +543,7 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
                 # Move to next
                 next_stage = stages[current_index + 1]
                 if next_stage.stage_type == "parallel_fanout":
-                    sends = []
-                    for p in (next_stage.target_providers or []):
-                        sends.append(Send(f"worker_{next_stage.stage_name}_{p}", state))
-                    return sends
+                    return f"worker_parallel_fanout_{next_stage.stage_name}"
                 else:
                     return f"worker_{next_stage.stage_name}"
             return route
