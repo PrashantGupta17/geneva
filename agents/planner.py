@@ -37,8 +37,9 @@ class PlannerAgent:
 
         for m in models_data:
             capabilities = m.get('capabilities', [])
+            web_search = "Yes" if m.get("web_search") else "No"
             capabilities_str = f"['{capabilities[0]}', '{capabilities[1]}']" if len(capabilities) > 1 else f"['{capabilities[0]}']" if capabilities else "[]"
-            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Capabilities: {capabilities_str})\n"
+            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Web Search: {web_search}, Capabilities: {capabilities_str})\n"
 
         if not providers_list:
             providers_list = "None found"
@@ -112,8 +113,9 @@ Respond ONLY with the raw JSON object conforming exactly to the ProjectDSL schem
 
         for m in models_data:
             capabilities = m.get('capabilities', [])
+            web_search = "Yes" if m.get("web_search") else "No"
             capabilities_str = f"['{capabilities[0]}', '{capabilities[1]}']" if len(capabilities) > 1 else f"['{capabilities[0]}']" if capabilities else "[]"
-            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Capabilities: {capabilities_str})\n"
+            providers_list += f"- Pooled Model: {m['pool_name']} (Tier: {m.get('tier', 'standard')}, Web Search: {web_search}, Capabilities: {capabilities_str})\n"
 
         if not providers_list:
             providers_list = "None found"

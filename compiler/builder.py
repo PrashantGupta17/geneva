@@ -242,12 +242,19 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
         builder.add_node("waiting", dummy_node)
         builder.add_edge(START, "waiting")
         builder.add_edge("waiting", END)
-        # We need a persistent checkpointer for the fallback as well if we are standardizing
-        conn = sqlite3.connect("geneva_persistence.db", check_same_thread=False)
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        checkpointer = SqliteSaver(conn)
-        checkpointer.setup()
-        return builder.compile(checkpointer=checkpointer)
+        
+        # Use existing postgres logic for fallback persistence
+        dbos_url = os.environ.get("DBOS_DATABASE_URL")
+        if not dbos_url:
+            dbos_url = "postgresql://postgres:password@localhost:5432/dbos"
+        
+        if os.environ.get("DBOS_DISABLE") != "1":
+            pool = ConnectionPool(conninfo=dbos_url, max_size=5, kwargs={"autocommit": True})
+            checkpointer = PostgresSaver(pool)
+            checkpointer.setup()
+            return builder.compile(checkpointer=checkpointer)
+        else:
+            return builder.compile(checkpointer=MemorySaver())
 
     dsl = load_dsl(dsl_filepath)
     stages = dsl.stages

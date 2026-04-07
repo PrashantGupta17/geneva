@@ -4,3 +4,8 @@ __pycache__/
 .env
 chroma_db/
 *.db
+
+# Geneva OS Persistence
+geneva_config.yaml
+projects/
+storage/

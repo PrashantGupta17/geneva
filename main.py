@@ -26,6 +26,48 @@ def get_status_from_graph(graph, thread_id):
         return status, active_pid
     return "IDLE", None
 
+def display_projects():
+    print("\n[CLI] Listing projects...")
+    projects_dir = "projects"
+    if not os.path.exists(projects_dir):
+        os.makedirs(projects_dir)
+    indexed_projects = []
+    for filename in os.listdir(projects_dir):
+        if filename.endswith(".yaml"):
+            try:
+                filepath = os.path.join(projects_dir, filename)
+                with open(filepath, "r") as f:
+                    data = yaml.safe_load(f)
+                    if data:
+                        from core.schemas import ProjectDSL
+                        dsl = ProjectDSL(**data)
+                        t_id = dsl.thread_id
+                        name = dsl.project_name
+                        orig = dsl.original_problem
+
+                        graph = build_graph(filepath)
+                        status, _ = get_status_from_graph(graph, t_id)
+                        indexed_projects.append((t_id, name, orig, status))
+            except Exception:
+                pass
+
+    for i, (t_id, name, orig, status) in enumerate(indexed_projects):
+        print(f" {i+1}. {name} (ID: {t_id}) | {orig[:30]}... | Status: {status}")
+    return indexed_projects
+
+def verify_api_connectivity(provider_name, model_id):
+    """Utility to verify that a model is accessible and the API key is valid."""
+    import litellm
+    from litellm import completion
+    try:
+        # 1-token ping
+        model_str = f"{provider_name}/{model_id}" if "/" not in model_id else model_id
+        print(f"[Verifier] Pinging {model_str} to verify connectivity...")
+        completion(model=model_str, messages=[{"role": "user", "content": "hi"}], max_tokens=1)
+        return True, "Success"
+    except Exception as e:
+        return False, str(e)
+
 def main():
 
     # Phase 5: Repository Hygiene
@@ -71,7 +113,7 @@ def main():
         else:
             prompt_prefix = ""
 
-        user_input = input(f"{prompt_prefix}Enter command (/list, /attach <id>, /fork <id>, /detach, /pause, /resume, /rewind <index>, /resync, approve, reject) or a new problem/feedback (or 'quit'): ").strip()
+        user_input = input(f"{prompt_prefix}Enter command (/list, /attach, /fork, /rewind, /status, /config, /help, approve, reject) or a new problem (or 'quit'): ").strip()
 
         if user_input.lower() == 'quit':
             for proc in active_processes:
@@ -83,51 +125,136 @@ def main():
         if not user_input:
             continue
 
-        if user_input.startswith("/config provider add "):
-            name = user_input.replace("/config provider add ", "").strip()
-            if name:
-                api_key = input(f"Enter the API key for {name}: ").strip()
-                # Secure Action: Write the key to the .env file
-                with open(".env", "a") as env_file:
-                    env_file.write(f"\n{name.upper()}_API_KEY={api_key}\n")
-
-                # Update geneva_config.yaml
-                if os.path.exists("geneva_config.yaml"):
-                    with open("geneva_config.yaml", "r") as config_file:
-                        config = yaml.safe_load(config_file) or {}
-                else:
-                    config = {}
-
-                if "providers" not in config:
-                    config["providers"] = []
-
-                # Check if provider already exists
-                exists = False
-                for p in config["providers"]:
-                    if p["name"] == name:
-                        exists = True
-                        break
-
-                if not exists:
-                    config["providers"].append({"name": name, "type": "api"})
-                    with open("geneva_config.yaml", "w") as config_file:
-                        yaml.dump(config, config_file, sort_keys=False)
-                    print(f"Provider '{name}' added successfully.")
-                else:
-                    print(f"Provider '{name}' already exists.")
+        if user_input.startswith("/help"):
+            print("\n[CLI] Available Commands:")
+            print("  /list              - List all projects in the workspace")
+            print("  /attach [index]    - Attach to a project by its list number")
+            print("  /fork [index]      - Fork a project by its list number")
+            print("  /rewind [index]    - Rewind the active project to a stage number")
+            print("  /status            - Get an LLM-powered summary of project progress")
+            print("  /config provider add <name> - Add a new API provider and key")
+            print("  /config model add           - Add and categorize a model")
+            print("  /config master <name>       - Switch the Master Planner model")
+            print("  /config list                - List all providers and model pools")
+            print("  /pause / /resume   - Control background execution")
+            print("  approve / reject   - Finalize DSL or discard context")
             continue
 
-        if user_input.startswith("/config model add"):
-            provider_name = input("Enter the provider name (e.g., groq): ").strip()
-            model_id = input("Enter the specific model ID (e.g., llama3-70b-8192): ").strip()
+        if user_input.startswith("/config"):
+            if user_input == "/config" or user_input == "/config ":
+                print("\n[CLI] Configuration Commands:")
+                print("  /config provider add <name> - Add a new API provider and key")
+                print("  /config model add           - Add and categorize a model")
+                print("  /config master <name>       - Switch the Master Planner model")
+                print("  /config list                - List all providers and model pools")
 
-            from core.meta_llm import invoke_master_llm
-            prompt = f"Categorize the model '{model_id}' from provider '{provider_name}'. Return ONLY a JSON object with keys: 'pool_name' (a generic capability name, e.g., 'llama-3-70b'), 'tier' (exactly one of: 'premium', 'standard', 'free'), and 'capabilities' (a list of strings like ['text', 'json', 'reasoning'])."
+            elif user_input.startswith("/config master "):
+                new_master = user_input.replace("/config master ", "").strip()
+                if os.path.exists("geneva_config.yaml"):
+                    with open("geneva_config.yaml", "r") as f:
+                        config = yaml.safe_load(f) or {}
 
-            print("[Planner] Calling Master LLM to categorize the model...")
-            try:
-                response = invoke_master_llm(prompt, response_format={"type": "json_object"})
-                parsed_response = json.loads(response)
+                    # Verify provider exists
+                    providers = config.get("providers", [])
+                    if any(p["name"] == new_master for p in providers):
+                        config["master_planner"] = new_master
+                        with open("geneva_config.yaml", "w") as f:
+                            yaml.dump(config, f, sort_keys=False)
+
+                        # Re-initialize planner
+                        master_model = "openrouter/auto"
+                        for p in providers:
+                            if p["name"] == new_master:
+                                master_model = p.get("litellm_model_name", p["name"])
+                                break
+                        planner = PlannerAgent(model=master_model)
+                        print(f"Master Planner switched to '{new_master}' ({master_model}).")
+                    else:
+                        print(f"Error: Provider '{new_master}' not found in config. Run /config provider add first.")
+                else:
+                    print("Error: No geneva_config.yaml found. Run bootstrap first.")
+
+            elif user_input.startswith("/config provider add "):
+                name = user_input.replace("/config provider add ", "").strip()
+                if name:
+                    api_key = input(f"Enter the API key for {name}: ").strip()
+                    test_model = input(f"Enter a common model ID for {name} to verify (e.g. gpt-3.5-turbo): ").strip()
+                    
+                    # Secure Action: Set env temporarily to verify
+                    os.environ[f"{name.upper()}_API_KEY"] = api_key
+                    ok, err = verify_api_connectivity(name, test_model)
+                    
+                    if not ok:
+                        print(f"Error: Could not verify connectivity for provider '{name}': {err}")
+                        continue
+
+                    # Secure Action: Write the key to the .env file
+                    with open(".env", "a") as env_file:
+                        env_file.write(f"\n{name.upper()}_API_KEY={api_key}\n")
+
+                    # Update geneva_config.yaml
+                    if os.path.exists("geneva_config.yaml"):
+                        with open("geneva_config.yaml", "r") as config_file:
+                            config = yaml.safe_load(config_file) or {}
+                    else:
+                        config = {}
+
+                    if "providers" not in config:
+                        config["providers"] = []
+                    if "models" not in config:
+                        config["models"] = []
+
+                    # Add provider
+                    if not any(p["name"] == name for p in config["providers"]):
+                        config["providers"].append({"name": name, "type": "api"})
+
+                    # Auto-add all models from catalog for this provider
+                    from core.catalog import get_models_for_provider
+                    catalog_models = get_models_for_provider(name)
+                    
+                    added_count = 0
+                    for m in catalog_models:
+                        if not any(existing["model_id"] == m["model_id"] and existing["provider"] == name for existing in config["models"]):
+                            config["models"].append(m)
+                            added_count += 1
+
+                    with open("geneva_config.yaml", "w") as config_file:
+                        yaml.dump(config, config_file, sort_keys=False)
+                    
+                    print(f"Provider '{name}' verified and added. Auto-configured {added_count} models from the catalog.")
+
+            elif user_input.startswith("/config model add"):
+                provider_name = input("Enter the provider name (e.g., groq): ").strip()
+                model_id = input("Enter the specific model ID (e.g., llama3-70b-8192): ").strip()
+
+                # 1. Immediate Verification
+                ok, err = verify_api_connectivity(provider_name, model_id)
+                if not ok:
+                    print(f"Error: Could not verify model '{model_id}' on provider '{provider_name}': {err}")
+                    continue
+
+                # 2. Categorization from Catalog or Manual
+                from core.catalog import get_model_info
+                model_info = get_model_info(provider_name, model_id)
+                
+                if model_info:
+                    print(f"[Catalog] Model found in official catalog. Categorizing as '{model_info['pool_name']}'.")
+                    parsed_cat = model_info
+                else:
+                    print(f"[Catalog] Model '{model_id}' not found in official catalog.")
+                    pool_name = input("Enter a generic pool name for this model (e.g. llama-3-70b): ").strip()
+                    tier = input("Enter the tier (premium, standard, free): ").strip()
+                    caps_str = input("Enter capabilities as a comma-separated list (e.g. text,json,reasoning,web): ").strip()
+                    capabilities = [c.strip() for c in caps_str.split(",") if c.strip()]
+                    
+                    parsed_cat = {
+                        "provider": provider_name,
+                        "model_id": model_id,
+                        "pool_name": pool_name,
+                        "tier": tier,
+                        "capabilities": capabilities,
+                        "web_search": "web" in capabilities or "web_search" in capabilities
+                    }
 
                 if os.path.exists("geneva_config.yaml"):
                     with open("geneva_config.yaml", "r") as config_file:
@@ -137,48 +264,48 @@ def main():
 
                 if "models" not in config:
                     config["models"] = []
+                    
+                if not any(existing["model_id"] == model_id and existing["provider"] == provider_name for existing in config["models"]):
+                    config["models"].append(parsed_cat)
+                    with open("geneva_config.yaml", "w") as config_file:
+                        yaml.dump(config, config_file, sort_keys=False)
+                    print(f"Model '{model_id}' added successfully under pool '{parsed_cat.get('pool_name', 'unknown')}'.")
+                else:
+                    print(f"Model '{model_id}' already exists in the configuration.")
 
-                config["models"].append({
-                    "provider": provider_name,
-                    "model_id": model_id,
-                    "pool_name": parsed_response.get("pool_name", "unknown"),
-                    "tier": parsed_response.get("tier", "standard"),
-                    "capabilities": parsed_response.get("capabilities", [])
-                })
+            elif user_input.startswith("/config list"):
+                if os.path.exists("geneva_config.yaml"):
+                    with open("geneva_config.yaml", "r") as config_file:
+                        config = yaml.safe_load(config_file) or {}
 
-                with open("geneva_config.yaml", "w") as config_file:
-                    yaml.dump(config, config_file, sort_keys=False)
+                    print("\n[CLI] Configured Providers:")
+                    providers = config.get("providers", [])
+                    if not providers:
+                        print("  None")
+                    for p in providers:
+                        print(f"  - {p['name']} ({p.get('type', 'api')})")
 
-                print(f"Model '{model_id}' categorized and added successfully under pool '{parsed_response.get('pool_name', 'unknown')}'.")
-            except Exception as e:
-                print(f"Failed to categorize and add model: {e}")
+                    print("\n[CLI] Pooled Models:")
+                    models = config.get("models", [])
+                    if not models:
+                        print("  None (Use /config model add to add models)")
+                    else:
+                        models_by_pool = {}
+                        for m in models:
+                            pool = m.get("pool_name", "unknown")
+                            if pool not in models_by_pool:
+                                models_by_pool[pool] = []
+                            models_by_pool[pool].append(m)
 
-            continue
-
-        if user_input == "/config list":
-            if os.path.exists("geneva_config.yaml"):
-                with open("geneva_config.yaml", "r") as config_file:
-                    config = yaml.safe_load(config_file) or {}
-
-                print("\n[CLI] Configured Providers:")
-                for p in config.get("providers", []):
-                    print(f"  - {p['name']} ({p['type']})")
-
-                print("\n[CLI] Pooled Models:")
-                models_by_pool = {}
-                for m in config.get("models", []):
-                    pool = m.get("pool_name", "unknown")
-                    if pool not in models_by_pool:
-                        models_by_pool[pool] = []
-                    models_by_pool[pool].append(m)
-
-                for pool, models in models_by_pool.items():
-                    print(f"  Pool: {pool}")
-                    for m in models:
-                        caps = ", ".join(m.get("capabilities", []))
-                        print(f"    - {m['provider']}/{m['model_id']} (Tier: {m.get('tier')}, Capabilities: [{caps}])")
+                        for pool, models_in_pool in models_by_pool.items():
+                            print(f"  Pool: {pool}")
+                            for m in models_in_pool:
+                                caps = ", ".join(m.get("capabilities", []))
+                                print(f"    - {m['provider']}/{m['model_id']} (Tier: {m.get('tier')}, Capabilities: [{caps}])")
+                else:
+                    print("No configuration found.")
             else:
-                print("No configuration found.")
+                print("Unknown config command. Type /help for usage.")
             continue
 
         if user_input.startswith("/detach"):
@@ -187,55 +314,29 @@ def main():
             break
 
         if user_input.startswith("/list"):
-            print("\n[CLI] Listing projects...")
-            projects_dir = "projects"
-            indexed_projects = []
-            for filename in os.listdir(projects_dir):
-                if filename.endswith(".yaml"):
-                    try:
-                        filepath = os.path.join(projects_dir, filename)
-                        with open(filepath, "r") as f:
-                            data = yaml.safe_load(f)
-                            if data:
-                                dsl = ProjectDSL(**data)
-                                t_id = dsl.thread_id
-                                name = dsl.project_name
-                                orig = dsl.original_problem
-
-                                graph = build_graph(filepath)
-                                status, _ = get_status_from_graph(graph, t_id)
-                                indexed_projects.append((t_id, name, orig, status))
-                    except Exception as e:
-                        pass
-
-            for i, (t_id, name, orig, status) in enumerate(indexed_projects):
-                print(f" {i+1}. {name} (ID: {t_id}) | {orig[:30]}... | Status: {status}")
-
-            # Store it globally or within the loop scope for attach/fork
-            globals()["indexed_projects_cache"] = indexed_projects
+            globals()["indexed_projects_cache"] = display_projects()
             continue
 
         if user_input.startswith("/attach"):
             parts = user_input.split(" ")
             t_id = None
-            if len(parts) > 1:
+            if len(parts) > 1 and not parts[1].isdigit():
                 t_id = parts[1]
             else:
-                idx_str = input("Enter the project number to attach: ").strip()
-                try:
-                    idx = int(idx_str) - 1
-                    cache = globals().get("indexed_projects_cache", [])
-                    if 0 <= idx < len(cache):
-                        t_id = cache[idx][0]
-                    else:
-                        print("Invalid project number.")
+                if len(parts) == 1 or parts[1].isdigit():
+                    globals()["indexed_projects_cache"] = display_projects()
+                    idx_str = parts[1] if len(parts) > 1 else input("Enter the project number to attach: ").strip()
+                    try:
+                        idx = int(idx_str) - 1
+                        cache = globals().get("indexed_projects_cache", [])
+                        if 0 <= idx < len(cache):
+                            t_id = cache[idx][0]
+                        else:
+                            print("Invalid project number.")
+                            continue
+                    except ValueError:
+                        print("Please enter a valid number.")
                         continue
-                except ValueError:
-                    print("Please enter a valid number.")
-                    continue
-                except IndexError:
-                    print("Invalid project number.")
-                    continue
 
             if t_id:
                 filepath = f"projects/{t_id}.yaml"
@@ -252,24 +353,23 @@ def main():
         if user_input.startswith("/fork"):
             parts = user_input.split(" ")
             parent_id = None
-            if len(parts) > 1:
+            if len(parts) > 1 and not parts[1].isdigit():
                 parent_id = parts[1]
             else:
-                idx_str = input("Enter the project number to fork: ").strip()
-                try:
-                    idx = int(idx_str) - 1
-                    cache = globals().get("indexed_projects_cache", [])
-                    if 0 <= idx < len(cache):
-                        parent_id = cache[idx][0]
-                    else:
-                        print("Invalid project number.")
+                if len(parts) == 1 or parts[1].isdigit():
+                    globals()["indexed_projects_cache"] = display_projects()
+                    idx_str = parts[1] if len(parts) > 1 else input("Enter the project number to fork: ").strip()
+                    try:
+                        idx = int(idx_str) - 1
+                        cache = globals().get("indexed_projects_cache", [])
+                        if 0 <= idx < len(cache):
+                            parent_id = cache[idx][0]
+                        else:
+                            print("Invalid project number.")
+                            continue
+                    except ValueError:
+                        print("Please enter a valid number.")
                         continue
-                except ValueError:
-                    print("Please enter a valid number.")
-                    continue
-                except IndexError:
-                    print("Invalid project number.")
-                    continue
 
             if parent_id:
                 parent_filename = f"projects/{parent_id}.yaml"
@@ -359,7 +459,8 @@ def main():
             index = None
             if len(parts) > 1:
                 try:
-                    index = int(parts[1])
+                    # Standardize: Convert the 1-based input to a 0-based index.
+                    index = int(parts[1]) - 1
                 except ValueError:
                     print("Invalid index.")
                     continue
@@ -375,7 +476,7 @@ def main():
 
                 idx_str = input("Enter the stage number to rewind to: ").strip()
                 try:
-                    # Execute: Convert the 1-based input to a 0-based index.
+                    # Standardize: Convert the 1-based input to a 0-based index.
                     index = int(idx_str) - 1
                 except ValueError:
                     print("Please enter a valid number.")
@@ -388,8 +489,23 @@ def main():
                         print("Killed paused process to avoid stale memory on resume.")
 
                     stage_name = active_dsl.stages[index].stage_name
-                    graph.update_state(thread_config, {"data": {stage_name: {"passed": False}}}, as_node=f"evaluator_{stage_name}")
-                    print(f"[CLI] Rewound project {active_thread_id} to stage index {index}.")
+                    # Secure the rewind: fetch existing data to prevent overwriting other stages
+                    state = graph.get_state(thread_config)
+                    current_data = state.values.get("data", {}).copy() if state and state.values else {}
+                    if stage_name not in current_data:
+                        current_data[stage_name] = {}
+                    current_data[stage_name]["passed"] = False
+                    
+                    # Increment loop counter to guarantee a fresh iteration index for DBOS (forced replay)
+                    current_loops = state.values.get("eval_loops", {}).copy() if state and state.values else {}
+                    current_loops[stage_name] = current_loops.get(stage_name, 0) + 1
+                    
+                    graph.update_state(thread_config, {
+                        "data": current_data, 
+                        "eval_loops": current_loops,
+                        "status": "PAUSED"
+                    }, as_node=f"evaluator_{stage_name}")
+                    print(f"[CLI] Rewound project {active_thread_id} to stage index {index+1} ({stage_name}). Status is PAUSED.")
                 except (ValueError, IndexError):
                     print("Invalid index.")
             continue

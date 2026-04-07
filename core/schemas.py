@@ -20,7 +20,7 @@ class StageDSL(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries if evaluation fails")
 
     stage_type: Literal["standard_llm", "parallel_fanout", "ephemeral_code", "data_ingestion"] = "standard_llm"
-    capability: Literal["text", "deep_research", "image_gen", "data_processing"] = "text"
+    capability: Literal["text", "deep_research", "image_gen", "data_processing", "web_search"] = "text"
     tool_args: Dict[str, Any] = Field(default_factory=dict)
     input_schema: Optional[Dict] = None
     ephemeral_script: Optional[str] = None

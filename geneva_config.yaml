@@ -1,8 +1,9 @@
 providers:
-- name: ollama
+- name: gemini_cli
   type: cli
-  absolute_path: /usr/bin/ollama
-  test_command: /usr/bin/ollama --version
-  supported_args:
-    --depth: integer
-master_planner: ollama
+  absolute_path: /opt/homebrew/bin/gemini
+  test_command: /opt/homebrew/bin/gemini --version
+- name: google
+  type: api
+master_planner: gemini_cli
+models: []
