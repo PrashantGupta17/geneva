@@ -575,7 +575,8 @@ def build_graph(dsl_filepath: str) -> CompiledStateGraph:
             dbos_url = "postgresql://postgres:password@localhost:5432/dbos"
 
     if os.environ.get("DBOS_DISABLE") != "1":
-        pool = ConnectionPool(conninfo=dbos_url)
+        # Enable autocommit to allow CREATE INDEX CONCURRENTLY in migrations
+        pool = ConnectionPool(conninfo=dbos_url, max_size=20, kwargs={"autocommit": True})
         checkpointer = PostgresSaver(pool)
         checkpointer.setup()
         graph = builder.compile(checkpointer=checkpointer, interrupt_before=interrupt_nodes)
